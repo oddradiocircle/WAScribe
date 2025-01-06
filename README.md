@@ -1,0 +1,2 @@
+# WAScribe
+Transcribe WhatsApp audios
