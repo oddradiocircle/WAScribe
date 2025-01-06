@@ -1,2 +1,2 @@
 # WAScribe
-Transcribe WhatsApp audios
+Transcribe WhatsApp audios using Groq and Pyannote.
