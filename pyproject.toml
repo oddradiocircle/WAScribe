@@ -1,0 +1,35 @@
+[project]
+name = "wascribe"
+version = "0.1.0"
+description = "Transcribe WhatsApp audios using Groq and Pyannote"
+authors = [
+    {name = "oddradiocircle"}
+]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">3.9"
+packages = [{include = "wascribe", from = "src"}]  # Añade esta línea
+dependencies = [
+    "click (>=8.1.8,<9.0.0)",
+    "typer (>=0.15.1,<0.16.0)",
+    "python-dotenv (>=1.0.1,<2.0.0)",
+    "requests (>=2.32.3,<3.0.0)",
+    "pydub (>=0.25.1,<0.26.0)",
+    "tqdm (>=4.67.1,<5.0.0)",
+    "pillow (>=11.1.0,<12.0.0)",
+    "tenacity (>=9.0.0,<10.0.0)",
+    "assemblyai (>=0.36.0,<0.37.0)"
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.4"
+black = "^24.10.0"
+isort = "^5.13.2"
+mypy = "^1.14.1"
+
+[tool.poetry.scripts]
+wascribe = "wascribe.cli:main"
