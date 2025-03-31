@@ -98,7 +98,7 @@ Muestra las opciones disponibles para recuperar archivos basándose en el histor
 | `--ai` | `-a` | Habilitar análisis de imágenes con IA | No | `False` |
 | `--api-key` | `-k` | Clave API de Mistral para funciones de IA | No | Desde variable de entorno |
 | `--verbose` | `-v` | Activar registro detallado de operaciones | No | `False` |
-| `--log-file` | - | Ruta al archivo de log | No | `image_seo_supername.log` |
+| `--log-file` | - | Ruta al archivo de log | No | `image_seo_supername.log` en el directorio de entrada |
 | `--no-log-file` | - | Deshabilitar registro en archivo | No | `False` |
 
 ## Ejemplos de uso
@@ -215,7 +215,7 @@ El script implementa un sistema de logging detallado para facilitar el seguimien
 
 5. **Archivo de log**:
    - Formato: texto plano con entradas separadas por línea
-   - Ubicación predeterminada: `image_seo_supername.log` en el directorio actual
+   - Ubicación predeterminada: `image_seo_supername.log` en el directorio de entrada de las imágenes
    - Modo de apertura: append (añade a un archivo existente)
    - Codificación: UTF-8 para soporte completo de caracteres
 

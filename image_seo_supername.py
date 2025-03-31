@@ -726,12 +726,22 @@ def main():
     
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging with detailed information')
     parser.add_argument('--log-file', type=str, default='image_seo_supername.log', 
-                        help='Path to log file (default: image_seo_supername.log)')
+                        help='Path to log file (default: image_seo_supername.log in input directory)')
     parser.add_argument('--no-log-file', action='store_true', help='Disable logging to file')
     
     args = parser.parse_args()
     
-    log_file = None if args.no_log_file else args.log_file
+    # Place log file in the input directory when specified
+    log_file = None
+    if not args.no_log_file:
+        if args.input:
+            # Use the input directory for the log file
+            input_dir = Path(args.input)
+            log_file = input_dir / (args.log_file if '/' not in args.log_file else Path(args.log_file).name)
+        else:
+            # Fallback to the specified log file path or default
+            log_file = args.log_file
+    
     logger = setup_logging(verbose=args.verbose, log_file=log_file)
     logger.info("Starting Image SEO SuperName")
     logger.debug(f"Command line arguments: {args}")
