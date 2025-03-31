@@ -270,23 +270,47 @@ class AISEOProcessor:
         """Generate SEO-friendly name from AI analysis and context."""
         components = []
 
-        # Extract keywords from AI analysis if available
+        # Extract keywords from AI analysis if available - but limit to fewer keywords
         if "keywords" in analysis and isinstance(analysis["keywords"], list):
-            keywords = [self._normalize_text(k) for k in analysis["keywords"][:3]]
+            # Only use the first 2 most relevant keywords to avoid including everything from context
+            keywords = [self._normalize_text(k) for k in analysis["keywords"][:2]]
             components.extend(keywords)
 
-        # Add subject if available
+        # Add subject if available - this is most reliable for what's actually in the image
         if "subject" in analysis and analysis["subject"]:
             subject = self._normalize_text(analysis["subject"])
             if subject and not any(subject in comp or comp in subject for comp in components):
                 components.append(subject)
+                
+        # If we have visual details, extract specific items visible in the image
+        if "visual" in analysis and analysis["visual"]:
+            visual_text = analysis["visual"].lower()
+            visual_items = []
+            
+            # Check for common items - only add if actually mentioned in visual description
+            for item in ["camiseta", "t-shirt", "tee", "shirt", "bolso", "bag", "wallet", "billetera"]:
+                if item in visual_text and not any(item in comp for comp in components):
+                    normalized_item = self._normalize_text(item)
+                    visual_items.append(normalized_item)
+            
+            # Add up to 2 visual items that are actually visible
+            for item in visual_items[:2]:
+                if not any(item in comp or comp in item for comp in components):
+                    components.append(item)
 
-        # Add basic components from context with deduplication
-        for key in ["brand", "product", "category"]:
-            if context.get(key):
-                component = self._normalize_text(context.get(key, ""))
-                if component and not any(component in comp or comp in component for comp in components):
-                    components.append(component)
+        # Always add brand name (usually safe to include)
+        if context.get("brand"):
+            brand = self._normalize_text(context.get("brand", ""))
+            if brand and not any(brand in comp or comp in brand for comp in components):
+                components.append(brand)
+                
+        # Only add other context items if we don't have enough components
+        if len(components) < 2:
+            for key in ["product", "category"]:
+                if context.get(key):
+                    component = self._normalize_text(context.get(key, ""))
+                    if component and not any(component in comp or comp in component for comp in components):
+                        components.append(component)
 
         # Combine components
         if not components:
@@ -295,8 +319,8 @@ class AISEOProcessor:
                 base_name = f"{base_name}-{sequence_number:03d}"
             return base_name
 
-        # Create name with limited components
-        base_name = "-".join(components[:4])  # Limit to 4 components
+        # Create name with limited components - use fewer components for precision
+        base_name = "-".join(components[:3])  # Limit to 3 components for more focused names
 
         # Truncate to whole words
         if len(base_name) > 50:
