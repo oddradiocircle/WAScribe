@@ -32,6 +32,47 @@ class AISEOProcessor:
         self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
         if not self.api_key:
             print("⚠️ No Mistral API key found. AI-powered features will be disabled.")
+            print("   Please set MISTRAL_API_KEY environment variable or use --api-key option.")
+        elif self.api_key.startswith(("sk-", "mis-")):
+            # Validate API key format - simple check
+            print("✅ Mistral API key found.")
+            # Perform a quick validation of the API connection
+            self._validate_api_connection()
+        else:
+            print("⚠️ Mistral API key has invalid format. AI features may not work correctly.")
+    
+    def _validate_api_connection(self):
+        """Validate API connection with a simple request."""
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            # Simple text-only request to check if API works
+            data = {
+                "model": "mistral-tiny",  # Use smallest model for quick validation
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 5
+            }
+            response = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=5  # Short timeout for quick check
+            )
+            
+            if response.status_code == 200:
+                print("✅ Successfully connected to Mistral API.")
+            elif response.status_code == 401:
+                print("❌ Authentication failed: Invalid API key.")
+                print("   Please check your Mistral API key and try again.")
+                self.api_key = None  # Disable AI features
+            else:
+                print(f"⚠️ Mistral API returned status code: {response.status_code}")
+                print(f"   Response: {response.text[:100]}...")
+        except Exception as e:
+            print(f"⚠️ Could not validate Mistral API connection: {e}")
+            print("   AI features may still work, but please check your internet connection.")
         
     @retry(
         stop=stop_after_attempt(3),
@@ -101,6 +142,8 @@ class AISEOProcessor:
                 "max_tokens": 800
             }
             
+            print(f"\r⏳ Analyzing image: {image_path.name}", end="", flush=True)
+            
             response = requests.post(
                 "https://api.mistral.ai/v1/chat/completions",
                 headers=headers,
@@ -109,7 +152,8 @@ class AISEOProcessor:
             )
             
             if response.status_code != 200:
-                return {"error": f"API error: {response.text}"}
+                error_msg = f"API error ({response.status_code}): {response.text[:100]}..."
+                return {"error": error_msg}
                 
             # Extract and parse JSON from response
             result = response.json()
@@ -121,79 +165,14 @@ class AISEOProcessor:
                 try:
                     analysis_data = json.loads(json_match.group(0))
                     return analysis_data
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    return {"error": f"Failed to parse JSON from response: {e}", "raw_response": content}
                     
             # Fallback: return the full text if JSON parsing fails
             return {"error": "Failed to parse structured data", "raw_response": content}
             
         except Exception as e:
             return {"error": f"Analysis error: {str(e)}"}
-    
-    def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: Optional[int] = None) -> str:
-        """Generate SEO name suggestions based on AI analysis and user context."""
-        
-        # Check for errors in analysis
-        if "error" in analysis:
-            # Use standard naming if AI failed
-            return None
-        
-        # Extract keywords from analysis
-        ai_keywords = analysis.get("keywords", [])
-        subject = analysis.get("subject", "").lower()
-        
-        # Combine AI keywords with user-provided context
-        combined_keywords = []
-        
-        # Add top 2 AI keywords if available
-        if ai_keywords and len(ai_keywords) >= 2:
-            combined_keywords.extend(ai_keywords[:2])
-        
-        # Add subject if it's not already included
-        if subject and subject not in [k.lower() for k in combined_keywords]:
-            combined_keywords.append(subject)
-            
-        # Add user context keywords
-        user_keywords = []
-        if context.get('keywords'):
-            user_keywords = [k.strip() for k in context.get('keywords', '').split(',')]
-            
-        # Select best keywords combining AI and user input
-        # Prioritize: 1. Brand 2. AI top keyword 3. Product 4. Location
-        final_components = []
-        
-        # Always start with brand if provided (always highest priority for SEO)
-        if context.get('brand'):
-            final_components.append(context.get('brand'))
-            
-        # Add top AI keyword if available
-        if ai_keywords and ai_keywords[0] not in final_components:
-            final_components.append(ai_keywords[0])
-            
-        # Add product/service
-        if context.get('product') and context.get('product') not in final_components:
-            final_components.append(context.get('product'))
-            
-        # Add location if provided
-        if context.get('location') and context.get('location') not in final_components:
-            final_components.append(context.get('location'))
-            
-        # Add category if provided
-        if context.get('category') and context.get('category') not in final_components:
-            final_components.append(context.get('category'))
-            
-        # Add one more AI keyword if needed
-        if len(final_components) < 4 and len(ai_keywords) > 1:
-            for kw in ai_keywords[1:]:
-                if kw not in final_components:
-                    final_components.append(kw)
-                    break
-                    
-        # Format components and add sequence number
-        name_base = "-".join(final_components)
-        if sequence_number is not None:
-            return f"{name_base}-{sequence_number:03d}"
-        return name_base
 
 
 class SEOImageProcessor:
@@ -428,11 +407,17 @@ class ImageRenamer:
                 if self.use_ai and self.ai_processor:
                     try:
                         ai_analysis = self.ai_processor.analyze_image(image_path, context)
-                        if "error" not in ai_analysis:
+                        if "error" in ai_analysis:
+                            print(f"\n⚠️ AI analysis failed for {image_path.name}: {ai_analysis['error']}")
+                            print("   Falling back to standard naming.")
+                        else:
                             ai_analyzed_count += 1
+                            print(f"\r✅ AI analysis succeeded for {image_path.name}" + " " * 30, end="", flush=True)
                     except Exception as e:
                         print(f"\n⚠️ AI analysis failed for {image_path.name}: {e}")
-                        # Continue with standard naming
+                        print("   Falling back to standard naming.")
+                elif self.use_ai:
+                    print(f"\n⚠️ AI analysis skipped for {image_path.name}: AI processor not available")
                 
                 # Generate the new name
                 if ai_analysis and "error" not in ai_analysis:
