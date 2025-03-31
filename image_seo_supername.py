@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import json
 import unicodedata
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dotenv import load_dotenv
 import argparse
 from tqdm import tqdm
@@ -12,11 +12,188 @@ from datetime import datetime
 import signal
 import sys
 import atexit
+import base64
+import requests
+from PIL import Image
+import io
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 class SEONamingError(Exception):
     """Custom exception for SEO naming errors."""
     pass
+
+
+class AISEOProcessor:
+    """AI-powered image analysis and SEO suggestion processor"""
+    
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize AI processor with optional API key."""
+        self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
+        if not self.api_key:
+            print("⚠️ No Mistral API key found. AI-powered features will be disabled.")
+        
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((requests.exceptions.RequestException, ConnectionError))
+    )
+    def analyze_image(self, image_path: Path, context: dict) -> Dict[str, Any]:
+        """
+        Analyze image using Mistral Vision API with user-provided context.
+        Returns structured information for SEO naming.
+        """
+        if not self.api_key:
+            return {"error": "No Mistral API key available"}
+        
+        if not image_path.exists():
+            return {"error": f"Image file not found: {image_path}"}
+            
+        # Check file size (10MB limit for Mistral API)
+        file_size_mb = image_path.stat().st_size / (1024 * 1024)
+        if file_size_mb > 10:
+            return {"error": f"Image too large ({file_size_mb:.1f}MB). Maximum size is 10MB."}
+            
+        try:
+            # Convert to base64
+            with open(image_path, "rb") as image_file:
+                # Try to open the image to validate it
+                Image.open(image_file).verify()
+                image_file.seek(0)  # Reset file pointer
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                
+            # Prepare user context as a string for the prompt
+            context_str = "\n".join([f"- {key}: {value}" for key, value in context.items() if value])
+                
+            # Create the prompt for image analysis
+            prompt = f"""
+            This image is for a marketing campaign. Please analyze it considering this context:
+            
+            {context_str}
+            
+            Provide a JSON response with:
+            1. A list of 5-7 SEO keywords extracted from the image (most relevant first)
+            2. Main subject or product visible
+            3. Visual characteristics (colors, style, composition)
+            4. Context/setting of the image
+            5. Suggested alt text (max 125 chars)
+            
+            Format as: {{"keywords": ["word1", "word2",...], "subject": "...", "visual": "...", "context": "...", "alt_text": "..."}}
+            """
+            
+            # Call Mistral API
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": "pixtral-12b-2409",
+                "messages": [
+                    {
+                        "role": "user", 
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                        ]
+                    }
+                ],
+                "max_tokens": 800
+            }
+            
+            response = requests.post(
+                "https://api.mistral.ai/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                return {"error": f"API error: {response.text}"}
+                
+            # Extract and parse JSON from response
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            
+            # Extract JSON part from response (it might contain explanatory text)
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                try:
+                    analysis_data = json.loads(json_match.group(0))
+                    return analysis_data
+                except json.JSONDecodeError:
+                    pass
+                    
+            # Fallback: return the full text if JSON parsing fails
+            return {"error": "Failed to parse structured data", "raw_response": content}
+            
+        except Exception as e:
+            return {"error": f"Analysis error: {str(e)}"}
+    
+    def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: Optional[int] = None) -> str:
+        """Generate SEO name suggestions based on AI analysis and user context."""
+        
+        # Check for errors in analysis
+        if "error" in analysis:
+            # Use standard naming if AI failed
+            return None
+        
+        # Extract keywords from analysis
+        ai_keywords = analysis.get("keywords", [])
+        subject = analysis.get("subject", "").lower()
+        
+        # Combine AI keywords with user-provided context
+        combined_keywords = []
+        
+        # Add top 2 AI keywords if available
+        if ai_keywords and len(ai_keywords) >= 2:
+            combined_keywords.extend(ai_keywords[:2])
+        
+        # Add subject if it's not already included
+        if subject and subject not in [k.lower() for k in combined_keywords]:
+            combined_keywords.append(subject)
+            
+        # Add user context keywords
+        user_keywords = []
+        if context.get('keywords'):
+            user_keywords = [k.strip() for k in context.get('keywords', '').split(',')]
+            
+        # Select best keywords combining AI and user input
+        # Prioritize: 1. Brand 2. AI top keyword 3. Product 4. Location
+        final_components = []
+        
+        # Always start with brand if provided (always highest priority for SEO)
+        if context.get('brand'):
+            final_components.append(context.get('brand'))
+            
+        # Add top AI keyword if available
+        if ai_keywords and ai_keywords[0] not in final_components:
+            final_components.append(ai_keywords[0])
+            
+        # Add product/service
+        if context.get('product') and context.get('product') not in final_components:
+            final_components.append(context.get('product'))
+            
+        # Add location if provided
+        if context.get('location') and context.get('location') not in final_components:
+            final_components.append(context.get('location'))
+            
+        # Add category if provided
+        if context.get('category') and context.get('category') not in final_components:
+            final_components.append(context.get('category'))
+            
+        # Add one more AI keyword if needed
+        if len(final_components) < 4 and len(ai_keywords) > 1:
+            for kw in ai_keywords[1:]:
+                if kw not in final_components:
+                    final_components.append(kw)
+                    break
+                    
+        # Format components and add sequence number
+        name_base = "-".join(final_components)
+        if sequence_number is not None:
+            return f"{name_base}-{sequence_number:03d}"
+        return name_base
 
 
 class SEOImageProcessor:
@@ -76,7 +253,7 @@ class SEOImageProcessor:
 
 
 class ImageRenamer:
-    def __init__(self, input_dir: Path, output_dir: Optional[Path] = None, language='en', safe_mode=True):
+    def __init__(self, input_dir: Path, output_dir: Optional[Path] = None, language='en', safe_mode=True, use_ai=False):
         self.input_dir = input_dir
         self.output_dir = output_dir or input_dir
         self.language = language
@@ -84,6 +261,19 @@ class ImageRenamer:
         self.renamed_files = {}
         self.history_file = self.output_dir / "rename_history.json"
         self.safe_mode = safe_mode  # Safe mode to copy instead of rename
+        self.use_ai = use_ai  # Whether to use AI features
+        
+        # Initialize AI processor if needed
+        self.ai_processor = None
+        if use_ai:
+            try:
+                self.ai_processor = AISEOProcessor()
+                if not self.ai_processor.api_key:
+                    print("⚠️ AI features disabled due to missing API key.")
+                    self.use_ai = False
+            except Exception as e:
+                print(f"⚠️ AI features disabled: {e}")
+                self.use_ai = False
         
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
@@ -95,34 +285,32 @@ class ImageRenamer:
         signal.signal(signal.SIGTERM, self._handle_exit)
     
     def _handle_exit(self, signum, frame):
-        """Handle safe exit by saving history"""
-        print("\nInterruption detected, saving history...")
+        """Handle exit signals by saving history."""
+        print("\n\n⚠️ Process interrupted. Saving history...")
         self.save_history()
-        sys.exit(0)
+        sys.exit(1)
 
     def load_history(self):
-        """Load renaming history."""
+        """Load renaming history from file if exists."""
         if self.history_file.exists():
             try:
-                with open(self.history_file, 'r') as f:
-                    data = json.load(f)
-                    self.renamed_files = data.get('renamed_files', {})
-                print(f"History loaded: {len(self.renamed_files)} files previously processed.")
-            except json.JSONDecodeError:
-                print("Error loading history. Starting with empty history.")
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    self.renamed_files = json.load(f)
+                print(f"📋 Loaded history with {len(self.renamed_files)} entries.")
+            except Exception as e:
+                print(f"⚠️ Error loading history: {e}")
                 self.renamed_files = {}
+        else:
+            self.renamed_files = {}
 
     def save_history(self):
-        """Save renaming history."""
+        """Save renaming history to file."""
         try:
-            with open(self.history_file, 'w') as f:
-                json.dump({
-                    'renamed_files': self.renamed_files,
-                    'timestamp': datetime.now().isoformat()
-                }, f, indent=2)
-            print(f"History saved to {self.history_file}")
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.renamed_files, f, indent=2, ensure_ascii=False)
+            print(f"\n📋 Saved history with {len(self.renamed_files)} entries to {self.history_file}")
         except Exception as e:
-            print(f"Error saving history: {e}")
+            print(f"⚠️ Error saving history: {e}")
 
     def collect_user_context(self) -> dict:
         """Collect user context for SEO naming."""
@@ -131,32 +319,46 @@ class ImageRenamer:
                 'brand': "Brand/Company (required): ",
                 'product': "Product/Service (required): ",
                 'category': "Category (required): ",
-                'keywords': "Keywords (comma separated): "
+                'location': "Location/Geographic area: ",
+                'keywords': "Keywords (comma separated): ",
+                'additional': "Additional context (helps AI better understand images):"
             },
             'es': {
                 'brand': "Marca/Empresa (requerido): ",
                 'product': "Producto/Servicio (requerido): ",
                 'category': "Categoría (requerido): ",
-                'keywords': "Palabras clave (separadas por comas): "
+                'location': "Ubicación/Área geográfica: ",
+                'keywords': "Palabras clave (separadas por comas): ",
+                'additional': "Contexto adicional (ayuda a la IA a entender mejor las imágenes):"
             }
         }
         lang_prompts = prompts.get(self.language, prompts['en'])
+        
         print("\n📝 Please provide the context for naming your images:")
         context = {
             'brand': input(lang_prompts['brand']).strip(),
             'product': input(lang_prompts['product']).strip(),
             'category': input(lang_prompts['category']).strip(),
-            'keywords': input(lang_prompts['keywords']).strip()
+            'location': input(lang_prompts['location']).strip(),
+            'keywords': input(lang_prompts['keywords']).strip(),
         }
+        
+        # Collect additional context if AI is enabled
+        if self.use_ai:
+            print("\n👁️ AI Analysis enabled - Additional context helps improve accuracy")
+            print("Examples: target audience, purpose of images, campaign details, specific features to highlight")
+            context['additional'] = input(lang_prompts['additional'] + "\n").strip()
+            
         # Validate required fields
-        if not context['brand'] or not context['product']:
-            print("⚠️ Brand and product are required fields.")
+        if not context['brand'] or not context['product'] or not context['category']:
+            print("⚠️ Brand, product, and category are required fields.")
             return self.collect_user_context()
         
         # Show summary for confirmation
         print("\nSEO Context Summary:")
         for key, value in context.items():
-            print(f"  - {key.capitalize()}: {value}")
+            if value:  # Only show non-empty values
+                print(f"  - {key.capitalize()}: {value}")
         
         # Example generated name
         example_name = self.processor.generate_seo_name(context, sequence_number=1)
@@ -189,6 +391,10 @@ class ImageRenamer:
             if confirm.lower() not in ['y', 'yes']:
                 print("Operation canceled by user.")
                 return
+        
+        # Show AI mode if enabled
+        if self.use_ai:
+            print("🤖 AI-powered image analysis: ENABLED")
                 
         # Verify disk space for copy mode
         if self.safe_mode and self.output_dir != self.input_dir:
@@ -205,53 +411,81 @@ class ImageRenamer:
         test_names = {}
         duplicates = []
         
-        for i, image_path in enumerate(image_files):
-            base_name = self.processor.generate_seo_name(context, sequence_number=i + 1)
-            new_name = f"{base_name}{image_path.suffix.lower()}"
-            if new_name in test_names:
-                duplicates.append((new_name, image_path, test_names[new_name]))
-            test_names[new_name] = image_path
-        
-        # If duplicates exist, alert
-        if duplicates:
-            print("\n⚠️ WARNING: Duplicate names detected that would cause overwrites.")
-            print("This should not occur with the sequence number, but will be corrected during processing.")
-
         # Process each image
         processed_count = 0
         skipped_count = 0
         error_count = 0
+        ai_analyzed_count = 0
         
+        # Progress bar for processing
         for i, image_path in enumerate(tqdm(image_files, desc="Processing images")):
-            # Skip if already processed
-            if str(image_path) in self.renamed_files and Path(self.renamed_files[str(image_path)]).exists():
-                skipped_count += 1
-                continue
-                
             try:
-                # Generate SEO name with sequence number to ensure uniqueness
-                base_name = self.processor.generate_seo_name(context, sequence_number=i + 1)
-                new_name = f"{base_name}{image_path.suffix.lower()}"
-                output_path = self.output_dir / new_name
+                # Generate the new name with sequence number to avoid duplicates
+                sequence_number = i + 1
                 
-                # Check for name collisions and adjust if necessary
-                counter = 1
-                while output_path.exists():
-                    # Add an additional counter if the name already exists
-                    adjusted_name = f"{base_name}-{counter}{image_path.suffix.lower()}"
-                    output_path = self.output_dir / adjusted_name
-                    counter += 1
+                # AI analysis for enhanced naming (if enabled)
+                ai_analysis = None
+                if self.use_ai and self.ai_processor:
+                    try:
+                        ai_analysis = self.ai_processor.analyze_image(image_path, context)
+                        if "error" not in ai_analysis:
+                            ai_analyzed_count += 1
+                    except Exception as e:
+                        print(f"\n⚠️ AI analysis failed for {image_path.name}: {e}")
+                        # Continue with standard naming
                 
-                # Perform operation based on mode
-                if self.safe_mode:
-                    # Copy file (safe mode)
-                    shutil.copy2(image_path, output_path)
+                # Generate the new name
+                if ai_analysis and "error" not in ai_analysis:
+                    # Use AI-powered naming
+                    new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
+                    # Fallback to standard naming if AI naming fails
+                    if not new_name_base:
+                        new_name_base = self.processor.generate_seo_name(context, sequence_number)
                 else:
-                    # Rename file (caution: modifies original)
-                    image_path.rename(output_path)
+                    # Use standard naming
+                    new_name_base = self.processor.generate_seo_name(context, sequence_number)
                 
-                # Register in history
-                self.renamed_files[str(image_path)] = str(output_path)
+                # Ensure the new name is valid, normalize if needed
+                new_name_base = self.processor._normalize_text(new_name_base)
+                
+                # Add extension
+                new_name = f"{new_name_base}{image_path.suffix.lower()}"
+                
+                # Check for duplicate names in the output directory
+                new_path = self.output_dir / new_name
+                if new_path.exists() and not (self.safe_mode and self.output_dir == self.input_dir):
+                    # If duplicate, try adding additional sequence number
+                    for j in range(1, 100):
+                        alt_name = f"{new_name_base}-alt{j}{image_path.suffix.lower()}"
+                        alt_path = self.output_dir / alt_name
+                        if not alt_path.exists():
+                            new_name = alt_name
+                            new_path = alt_path
+                            break
+                    else:
+                        # If all alternatives exist, skip this file
+                        print(f"\n⚠️ Skipping {image_path.name}: Unable to generate unique name")
+                        skipped_count += 1
+                        continue
+                
+                # Store original and new names
+                self.renamed_files[str(image_path)] = {
+                    "original_name": image_path.name,
+                    "new_name": new_name,
+                    "timestamp": datetime.now().isoformat(),
+                    "ai_analyzed": ai_analysis is not None and "error" not in ai_analysis
+                }
+                
+                # Generate alt text if AI was used
+                if ai_analysis and "alt_text" in ai_analysis:
+                    self.renamed_files[str(image_path)]["alt_text"] = ai_analysis["alt_text"]
+                
+                # Perform the actual file operation (copy or rename)
+                if self.safe_mode:
+                    shutil.copy2(image_path, new_path)
+                else:
+                    shutil.move(image_path, new_path)
+                
                 processed_count += 1
                 
                 # Save history periodically
@@ -259,238 +493,242 @@ class ImageRenamer:
                     self.save_history()
                     
             except Exception as e:
-                print(f"\n❌ Error processing {image_path}: {e}")
+                print(f"\n⚠️ Error processing {image_path.name}: {e}")
                 error_count += 1
-                
-        # Save final history
+        
+        # Final save of history
         self.save_history()
         
         # Show summary
-        print(f"\n✅ Process completed:")
-        print(f"  - Images processed: {processed_count}")
-        print(f"  - Images skipped (already processed): {skipped_count}")
-        print(f"  - Errors: {error_count}")
-        
-        if self.safe_mode and processed_count > 0:
-            print(f"\nOriginal files remain intact in:")
-            print(f"  {self.input_dir}")
-            print(f"Renamed versions are located in:")
-            print(f"  {self.output_dir}")
-        
-        print(f"\nHistory saved to: {self.history_file}")
+        print("\n✅ Processing complete!")
+        print(f"   - Processed: {processed_count} images")
+        print(f"   - Skipped: {skipped_count} images")
+        print(f"   - Errors: {error_count} images")
+        if self.use_ai:
+            print(f"   - AI analyzed: {ai_analyzed_count} images")
+        print(f"\n📂 Output directory: {self.output_dir}")
+        print(f"📋 History saved to: {self.history_file}")
 
-
-def restore_from_history(history_file: Path, force: bool = False):
-    """Restore original filenames from history file."""
-    if not history_file.exists():
-        print(f"Error: History file {history_file} does not exist.")
-        return 1
-    
-    try:
-        with open(history_file, 'r') as f:
-            history = json.load(f)
-            renamed_files = history.get('renamed_files', {})
-            
-        if not renamed_files:
-            print("No renaming information in the history file.")
-            return 1
-            
-        print(f"Found {len(renamed_files)} files to restore.")
+    def restore_files(self, history_file: Path, force: bool = False):
+        """Restore files to original names using history file."""
+        if not history_file.exists():
+            print(f"⚠️ History file not found: {history_file}")
+            return
         
-        # Check if target files exist
-        existing_destinations = [Path(new) for new in renamed_files.values() if Path(new).exists()]
-        missing_destinations = [Path(new) for new in renamed_files.values() if not Path(new).exists()]
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading history file: {e}")
+            return
         
-        print(f"- {len(existing_destinations)} renamed files found")
-        print(f"- {len(missing_destinations)} renamed files not found")
+        print(f"📋 Loaded history with {len(history)} entries.")
         
-        if not existing_destinations:
-            print("No files found to restore.")
-            return 1
+        # Check which files can be restored
+        restorable = []
+        not_found = []
+        
+        for orig_path_str, info in history.items():
+            orig_path = Path(orig_path_str)
+            orig_dir = orig_path.parent
+            orig_name = info["original_name"]
+            new_name = info["new_name"]
             
-        # Check if original files already exist (avoid overwriting)
-        existing_originals = [Path(orig) for orig in renamed_files.keys() if Path(orig).exists()]
-        if existing_originals and not force:
-            print(f"\n⚠️ WARNING: {len(existing_originals)} original files already exist.")
-            print("This could cause data loss. Use --force to overwrite.")
-            return 1
+            # Find the renamed file
+            if self.safe_mode:
+                # In COPY mode, the original should still exist
+                current_path = orig_path
+                if not current_path.exists():
+                    not_found.append((orig_name, new_name, "Original missing"))
+                    continue
+            else:
+                # In RENAME mode, look for the new name
+                current_path = orig_dir / new_name
+                if not current_path.exists():
+                    not_found.append((orig_name, new_name, "Renamed file missing"))
+                    continue
             
+            # Check if restoration would overwrite
+            target_path = orig_dir / orig_name
+            if target_path.exists() and target_path != current_path and not force:
+                not_found.append((orig_name, new_name, "Would overwrite existing file"))
+                continue
+                
+            restorable.append((current_path, target_path, orig_name, new_name))
+        
+        if not restorable:
+            print("⚠️ No files can be restored.")
+            if not_found:
+                print(f"   {len(not_found)} files could not be found or would overwrite existing files.")
+            return
+        
+        print(f"\n✅ Found {len(restorable)} files that can be restored.")
+        if not_found:
+            print(f"⚠️ {len(not_found)} files cannot be restored (use --force to override).")
+            
+        confirm = input("\nRestore these files? (y/n): ")
+        if confirm.lower() not in ['y', 'yes']:
+            print("Operation canceled by user.")
+            return
+        
         # Restore files
         restored = 0
-        failed = 0
-        for original, renamed in renamed_files.items():
-            orig_path = Path(original)
-            new_path = Path(renamed)
-            if new_path.exists():
-                try:
-                    if orig_path.exists() and not force:
-                        # If original exists, make a copy with another name
-                        backup_path = orig_path.with_name(f"{orig_path.stem}_restored{orig_path.suffix}")
-                        shutil.copy2(new_path, backup_path)
-                        print(f"✓ Restored as: {backup_path.name} (original already existed)")
-                    else:
-                        # Restore to original name
-                        os.makedirs(orig_path.parent, exist_ok=True)
-                        shutil.copy2(new_path, orig_path)
-                        print(f"✓ Restored: {orig_path.name}")
-                    restored += 1
-                except Exception as e:
-                    print(f"✗ Error restoring {orig_path.name}: {e}")
-                    failed += 1
+        errors = 0
         
-        print(f"\nRestoration completed: {restored} files restored, {failed} errors.")
-        return 0 if failed == 0 else 1
+        for current_path, target_path, orig_name, new_name in tqdm(restorable, desc="Restoring files"):
+            try:
+                if self.safe_mode:
+                    # In COPY mode, we just need to copy back to original name
+                    shutil.copy2(current_path, target_path)
+                else:
+                    # In RENAME mode, we rename back to original
+                    shutil.move(current_path, target_path)
+                restored += 1
+            except Exception as e:
+                print(f"\n⚠️ Error restoring {new_name} to {orig_name}: {e}")
+                errors += 1
         
-    except Exception as e:
-        print(f"Error during restoration: {e}")
-        return 1
-
-
-def show_recovery_options(history_file: Path):
-    """Display recovery options based on the history file."""
-    if not history_file.exists():
-        print(f"ERROR: History file not found at {history_file}")
-        return 1
-    
-    try:
-        # Load the history file
-        with open(history_file, 'r') as f:
-            history = json.load(f)
-            renamed_files = history.get('renamed_files', {})
+        print("\n✅ Restoration complete!")
+        print(f"   - Restored: {restored} files")
+        print(f"   - Errors: {errors} files")
         
-        # Check if any files were renamed
-        if not renamed_files:
-            print("No renamed files in the history.")
-            return 1
+    def show_recovery_options(self, history_file: Path):
+        """Show recovery options based on history file."""
+        if not history_file.exists():
+            print(f"⚠️ History file not found: {history_file}")
+            return
+        
+        try:
+            with open(history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+        except Exception as e:
+            print(f"⚠️ Error loading history file: {e}")
+            return
+        
+        print(f"📋 Loaded history with {len(history)} entries.")
+        
+        # Analyze history for recovery options
+        original_exists = 0
+        renamed_exists = 0
+        both_exist = 0
+        none_exist = 0
+        
+        for orig_path_str, info in history.items():
+            orig_path = Path(orig_path_str)
+            orig_dir = orig_path.parent
+            renamed_path = orig_dir / info["new_name"]
             
-        # Check if any target files exist
-        target_exists = False
-        for target_path in renamed_files.values():
-            if Path(target_path).exists():
-                target_exists = True
-                break
-                
-        if not target_exists:
-            print("Renamed files not found. They may have been moved or deleted.")
+            orig_exists = orig_path.exists()
+            renamed_exists = renamed_path.exists()
             
-        print(f"\nCurrent situation:")
-        print(f"- Total original files: {len(renamed_files)}")
+            if orig_exists and renamed_exists:
+                both_exist += 1
+            elif orig_exists:
+                original_exists += 1
+            elif renamed_exists:
+                renamed_exists += 1
+            else:
+                none_exist += 1
         
-        print("\nRecovery options:")
+        print("\n🔍 Recovery Analysis:")
+        print(f"   - Files with both original and renamed versions: {both_exist}")
+        print(f"   - Files with only original version: {original_exists}")
+        print(f"   - Files with only renamed version: {renamed_exists}")
+        print(f"   - Files with neither version found: {none_exist}")
         
-        # Option 1: Recover using this script
-        print("\n1. Restore files automatically")
-        print("   Run: python image_seo_supername.py --restore --history [path_to_history]")
-        
-        # Option 2: Recover from OneDrive
-        print("\n2. Recover from OneDrive version history")
-        print("   If using OneDrive, you can:")
-        print("   a) Go to https://onedrive.live.com")
-        print("   b) Navigate to the folder containing your images")
-        print("   c) Right-click the folder and select 'Version history'")
-        print("   d) Restore the version prior to running the script")
-        
-        # Option 3: Recycle Bin
-        print("\n3. Check the Recycle Bin")
-        print("   Files may be in the Recycle Bin.")
-        
-        # Print list of original files as reference
-        print("\nList of original files (first 10):")
-        for i, original in enumerate(sorted(renamed_files.keys())[:10]):
-            print(f"  {i+1}. {Path(original).name}")
-        
-        if len(renamed_files) > 10:
-            print(f"  ... and {len(renamed_files) - 10} more")
-            
-        return 0
-        
-    except Exception as e:
-        print(f"Error during recovery: {e}")
-        return 1
+        if both_exist + renamed_exists > 0:
+            print("\n💡 Recovery Options:")
+            print("   1. To restore original names:")
+            print(f"      python image_seo_supername.py --restore --history \"{history_file}\"")
+            if both_exist > 0:
+                print("\n   2. If you want to force overwrite existing files:")
+                print(f"      python image_seo_supername.py --restore --history \"{history_file}\" --force")
+        else:
+            print("\n⚠️ No files available for recovery.")
 
 
 def main():
-    """Main function."""
-    parser = argparse.ArgumentParser(description="SEO Image Renamer with recovery functionality")
+    """Main function to process command line arguments and execute the tool."""
+    parser = argparse.ArgumentParser(description="Image SEO SuperName: Optimize image filenames for SEO")
     
-    # Create argument groups for different functionalities
+    # Define mode groups
     mode_group = parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument('--rename', '-r', action='store_true', help="Rename images mode")
-    mode_group.add_argument('--restore', '-s', action='store_true', help="Restore renamed images mode")
-    mode_group.add_argument('--recovery-options', '-o', action='store_true', help="Show recovery options")
+    mode_group.add_argument('-r', '--rename', action='store_true', help='Rename images mode')
+    mode_group.add_argument('-s', '--restore', action='store_true', help='Restore original filenames mode')
+    mode_group.add_argument('-o', '--recovery-options', action='store_true', help='Show recovery options')
     
-    # Arguments for rename mode
-    rename_group = parser.add_argument_group('Rename options')
-    rename_group.add_argument('--input', '-i', type=str, help="Directory with images to process")
-    rename_group.add_argument('--output', '-O', type=str, help="Output directory (default: same as input)")
-    rename_group.add_argument('--language', '-l', type=str, choices=['en', 'es'], default='es', 
-                        help="Language for messages and processing (en=English, es=Spanish)")
-    rename_group.add_argument('--move', '-m', action='store_true', 
-                        help="Use MOVE mode instead of COPY (DANGEROUS, not recommended)")
+    # Common arguments
+    parser.add_argument('-i', '--input', type=str, help='Input directory containing images')
+    parser.add_argument('-O', '--output', type=str, help='Output directory (default: same as input)')
+    parser.add_argument('-l', '--language', default='en', choices=['en', 'es'], help='Language for prompts (en=English, es=Spanish)')
+    parser.add_argument('-m', '--move', action='store_true', help='Move files instead of copying (WARNING: This will modify original files)')
+    parser.add_argument('-H', '--history', type=str, help='Path to history file for restore/recovery')
+    parser.add_argument('-f', '--force', action='store_true', help='Force overwrite existing files during restore')
     
-    # Arguments for restore mode
-    restore_group = parser.add_argument_group('Restore options')
-    restore_group.add_argument('--history', '-H', type=str, 
-                         help="Renaming history file (rename_history.json)")
-    restore_group.add_argument('--force', '-f', action='store_true',
-                         help="Overwrite existing files if necessary during restoration")
+    # AI-specific arguments
+    parser.add_argument('-a', '--ai', action='store_true', help='Enable AI-powered image analysis for enhanced naming')
+    parser.add_argument('-k', '--api-key', type=str, help='Mistral API key (can also be set as MISTRAL_API_KEY env variable)')
     
     args = parser.parse_args()
-
-    # Load environment variables (if needed in the future)
+    
+    # Load environment variables
     load_dotenv()
+    
+    # Set API key from argument or environment
+    if args.api_key:
+        os.environ["MISTRAL_API_KEY"] = args.api_key
     
     # Rename mode
     if args.rename:
         if not args.input:
-            parser.error("The --input argument is required in rename mode")
-            
-        # Validate directories
+            parser.error("--input directory is required for rename mode")
         input_dir = Path(args.input)
-        if not input_dir.exists():
-            print(f"ERROR: Input directory {input_dir} does not exist.")
-            return 1
+        if not input_dir.exists() or not input_dir.is_dir():
+            parser.error(f"Input directory not found: {args.input}")
         
-        output_dir = Path(args.output) if args.output else None
+        output_dir = Path(args.output) if args.output else input_dir
+        renamer = ImageRenamer(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            language=args.language,
+            safe_mode=not args.move,
+            use_ai=args.ai
+        )
         
-        # Create instance with safe mode by default (copy instead of rename)
-        safe_mode = not args.move
-        renamer = ImageRenamer(input_dir, output_dir, language=args.language, safe_mode=safe_mode)
-        
-        # Show warning in dangerous mode
-        if not safe_mode:
-            print("\n⚠️ WARNING: MOVE mode activated. This mode modifies original files.")
-            print("If you prefer to keep your original files, press Ctrl+C and run without --move\n")
-        
-        try:
-            # Collect user context
-            context = renamer.collect_user_context()
-            # Process images
-            renamer.process_images(context)
-            return 0
-        except KeyboardInterrupt:
-            print("\nOperation canceled by user.")
-            return 1
-        except Exception as e:
-            print(f"\n❌ Error: {e}")
-            return 1
+        print("\n🔤 Image SEO SuperName - Rename Mode")
+        if args.ai:
+            print("🤖 AI-powered image analysis: ENABLED")
+        context = renamer.collect_user_context()
+        renamer.process_images(context)
     
     # Restore mode
     elif args.restore:
         if not args.history:
-            parser.error("The --history argument is required in restore mode")
-        
+            parser.error("--history file is required for restore mode")
         history_file = Path(args.history)
-        return restore_from_history(history_file, args.force)
+        renamer = ImageRenamer(
+            input_dir=Path.cwd(),  # Not used in restore mode
+            safe_mode=not args.move
+        )
+        print("\n🔄 Image SEO SuperName - Restore Mode")
+        renamer.restore_files(history_file, force=args.force)
     
-    # Show recovery options
+    # Recovery options mode
     elif args.recovery_options:
         if not args.history:
-            parser.error("The --history argument is required to show recovery options")
-        
+            parser.error("--history file is required for recovery options mode")
         history_file = Path(args.history)
-        return show_recovery_options(history_file)
+        renamer = ImageRenamer(input_dir=Path.cwd())  # Not used in this mode
+        print("\n🛟 Image SEO SuperName - Recovery Options")
+        renamer.show_recovery_options(history_file)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Process interrupted by user.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
