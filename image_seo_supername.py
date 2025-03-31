@@ -17,6 +17,37 @@ import requests
 from PIL import Image
 import io
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import logging
+
+
+def setup_logging(verbose=False, log_file=None):
+    """Configure logging based on verbosity level."""
+    log_level = logging.DEBUG if verbose else logging.INFO
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    detailed_format = '%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    root_logger.addHandler(console_handler)
+    
+    if log_file:
+        file_handler = logging.FileHandler(log_file, 'a', encoding='utf-8')
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(logging.Formatter(detailed_format))
+        root_logger.addHandler(file_handler)
+        print(f"📝 Detailed logs will be written to: {log_file}")
+    
+    logger = logging.getLogger('image_seo_supername')
+    if verbose:
+        logger.debug("Verbose logging enabled")
+    return logger
 
 
 class SEONamingError(Exception):
@@ -27,53 +58,47 @@ class SEONamingError(Exception):
 class AISEOProcessor:
     """AI-powered image analysis and SEO suggestion processor"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, logger=None):
         """Initialize AI processor with optional API key."""
         self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
+        self.logger = logger or logging.getLogger('image_seo_supername')
+        
         if not self.api_key:
+            self.logger.warning("No Mistral API key found. AI-powered features will be disabled.")
             print("⚠️ No Mistral API key found. AI-powered features will be disabled.")
-            print("   Please set MISTRAL_API_KEY environment variable or use --api-key option.")
         else:
-            # No format validation since Mistral API key format may vary
-            print("✅ Mistral API key found.")
-            # Perform a quick validation of the API connection
+            self.logger.info("Mistral API key found.")
             self._validate_api_connection()
     
     def _validate_api_connection(self):
         """Validate API connection with a simple request."""
         try:
+            self.logger.debug("Validating Mistral API connection...")
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
-            # Test the connection using the models endpoint which is lightweight
             response = requests.get(
                 "https://api.mistral.ai/v1/models",
                 headers=headers,
-                timeout=5  # Short timeout for quick check
+                timeout=5
             )
-            
+            self.logger.debug(f"Mistral API response status: {response.status_code}")
             if response.status_code == 200:
-                # Check if vision model is available
                 models = response.json()
                 available_models = [model["id"] for model in models.get("data", [])]
+                self.logger.debug(f"Available Mistral models: {available_models}")
                 if "pixtral-12b-2409" in available_models:
-                    print("✅ Successfully connected to Mistral API and vision model is available.")
+                    self.logger.info("Successfully connected to Mistral API and vision model is available.")
                 else:
-                    print("✅ Connected to Mistral API successfully.")
-                    print("⚠️ The vision model 'pixtral-12b-2409' was not found in available models.")
-                    print("   Available models:", ", ".join(available_models[:5]) + 
-                          ("..." if len(available_models) > 5 else ""))
+                    self.logger.warning("Vision model 'pixtral-12b-2409' not found.")
             elif response.status_code == 401:
-                print("❌ Authentication failed: Invalid API key.")
-                print("   Please check your Mistral API key and try again.")
-                self.api_key = None  # Disable AI features
+                self.logger.error("Authentication failed: Invalid Mistral API key.")
+                self.api_key = None
             else:
-                print(f"⚠️ Mistral API returned status code: {response.status_code}")
-                print(f"   Response: {response.text[:100]}...")
+                self.logger.error(f"Mistral API returned status code: {response.status_code}")
         except Exception as e:
-            print(f"⚠️ Could not validate Mistral API connection: {e}")
-            print("   AI features may still work, but please check your internet connection.")
+            self.logger.exception(f"Error validating Mistral API connection: {e}")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -243,39 +268,43 @@ class SEOImageProcessor:
 
 
 class ImageRenamer:
-    def __init__(self, input_dir: Path, output_dir: Optional[Path] = None, language='en', safe_mode=True, use_ai=False):
+    def __init__(self, input_dir: Path, output_dir: Optional[Path] = None, language='en', 
+                 safe_mode=True, use_ai=False, logger=None):
         self.input_dir = input_dir
         self.output_dir = output_dir or input_dir
         self.language = language
         self.processor = SEOImageProcessor(language=language)
         self.renamed_files = {}
         self.history_file = self.output_dir / "rename_history.json"
-        self.safe_mode = safe_mode  # Safe mode to copy instead of rename
-        self.use_ai = use_ai  # Whether to use AI features
+        self.safe_mode = safe_mode
+        self.use_ai = use_ai
+        self.logger = logger or logging.getLogger('image_seo_supername')
         
-        # Initialize AI processor if needed
+        self.logger.info(f"Initializing ImageRenamer with input_dir={input_dir}, output_dir={self.output_dir}")
+        self.logger.info(f"Configuration: language={language}, safe_mode={safe_mode}, use_ai={use_ai}")
+        
         self.ai_processor = None
         if use_ai:
             try:
-                self.ai_processor = AISEOProcessor()
+                self.logger.info("Initializing AI processor...")
+                self.ai_processor = AISEOProcessor(logger=self.logger)
                 if not self.ai_processor.api_key:
-                    print("⚠️ AI features disabled due to missing API key.")
+                    self.logger.warning("AI features disabled due to missing API key")
                     self.use_ai = False
             except Exception as e:
-                print(f"⚠️ AI features disabled: {e}")
+                self.logger.exception(f"Failed to initialize AI processor: {e}")
                 self.use_ai = False
         
-        # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
         self.load_history()
         
-        # Handle safe exit
         atexit.register(self.save_history)
         signal.signal(signal.SIGINT, self._handle_exit)
         signal.signal(signal.SIGTERM, self._handle_exit)
     
     def _handle_exit(self, signum, frame):
         """Handle exit signals by saving history."""
+        self.logger.warning("Process interrupted. Saving history...")
         print("\n\n⚠️ Process interrupted. Saving history...")
         self.save_history()
         sys.exit(1)
@@ -286,8 +315,10 @@ class ImageRenamer:
             try:
                 with open(self.history_file, 'r', encoding='utf-8') as f:
                     self.renamed_files = json.load(f)
+                self.logger.info(f"Loaded history with {len(self.renamed_files)} entries.")
                 print(f"📋 Loaded history with {len(self.renamed_files)} entries.")
             except Exception as e:
+                self.logger.exception(f"Error loading history: {e}")
                 print(f"⚠️ Error loading history: {e}")
                 self.renamed_files = {}
         else:
@@ -298,8 +329,10 @@ class ImageRenamer:
         try:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(self.renamed_files, f, indent=2, ensure_ascii=False)
+            self.logger.info(f"Saved history with {len(self.renamed_files)} entries to {self.history_file}")
             print(f"\n📋 Saved history with {len(self.renamed_files)} entries to {self.history_file}")
         except Exception as e:
+            self.logger.exception(f"Error saving history: {e}")
             print(f"⚠️ Error saving history: {e}")
 
     def collect_user_context(self) -> dict:
@@ -368,23 +401,28 @@ class ImageRenamer:
                       if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp'}]
         
         if not image_files:
+            self.logger.warning("No images found in the directory.")
             print("⚠️ No images found in the directory.")
             return
             
         print(f"\n🔍 Found {len(image_files)} images to process.")
+        self.logger.info(f"Found {len(image_files)} images to process.")
         
         # Set operation mode
         operation_mode = "COPY" if self.safe_mode else "RENAME"
         print(f"\n⚠️ Operation mode: {operation_mode}")
+        self.logger.info(f"Operation mode: {operation_mode}")
         if not self.safe_mode:
             confirm = input("WARNING: Rename mode will modify original files. Are you sure? (y/n): ")
             if confirm.lower() not in ['y', 'yes']:
                 print("Operation canceled by user.")
+                self.logger.warning("Operation canceled by user.")
                 return
         
         # Show AI mode if enabled
         if self.use_ai:
             print("🤖 AI-powered image analysis: ENABLED")
+            self.logger.info("AI-powered image analysis: ENABLED")
                 
         # Verify disk space for copy mode
         if self.safe_mode and self.output_dir != self.input_dir:
@@ -392,9 +430,11 @@ class ImageRenamer:
             free_space = shutil.disk_usage(self.output_dir).free
             if total_size > free_space * 0.9:  # Leave 10% margin
                 print(f"⚠️ Warning: Low disk space. Required: {total_size/1024/1024:.1f}MB, Available: {free_space/1024/1024:.1f}MB")
+                self.logger.warning(f"Low disk space. Required: {total_size/1024/1024:.1f}MB, Available: {free_space/1024/1024:.1f}MB")
                 confirm = input("Continue anyway? (y/n): ")
                 if confirm.lower() not in ['y', 'yes']:
                     print("Operation canceled by user.")
+                    self.logger.warning("Operation canceled by user due to low disk space.")
                     return
 
         # Verify names before processing
@@ -420,15 +460,19 @@ class ImageRenamer:
                         ai_analysis = self.ai_processor.analyze_image(image_path, context)
                         if "error" in ai_analysis:
                             print(f"\n⚠️ AI analysis failed for {image_path.name}: {ai_analysis['error']}")
+                            self.logger.warning(f"AI analysis failed for {image_path.name}: {ai_analysis['error']}")
                             print("   Falling back to standard naming.")
                         else:
                             ai_analyzed_count += 1
                             print(f"\r✅ AI analysis succeeded for {image_path.name}" + " " * 30, end="", flush=True)
+                            self.logger.info(f"AI analysis succeeded for {image_path.name}")
                     except Exception as e:
                         print(f"\n⚠️ AI analysis failed for {image_path.name}: {e}")
+                        self.logger.exception(f"AI analysis failed for {image_path.name}: {e}")
                         print("   Falling back to standard naming.")
                 elif self.use_ai:
                     print(f"\n⚠️ AI analysis skipped for {image_path.name}: AI processor not available")
+                    self.logger.warning(f"AI analysis skipped for {image_path.name}: AI processor not available")
                 
                 # Generate the new name
                 if ai_analysis and "error" not in ai_analysis:
@@ -461,6 +505,7 @@ class ImageRenamer:
                     else:
                         # If all alternatives exist, skip this file
                         print(f"\n⚠️ Skipping {image_path.name}: Unable to generate unique name")
+                        self.logger.warning(f"Skipping {image_path.name}: Unable to generate unique name")
                         skipped_count += 1
                         continue
                 
@@ -490,6 +535,7 @@ class ImageRenamer:
                     
             except Exception as e:
                 print(f"\n⚠️ Error processing {image_path.name}: {e}")
+                self.logger.exception(f"Error processing {image_path.name}: {e}")
                 error_count += 1
         
         # Final save of history
@@ -504,11 +550,13 @@ class ImageRenamer:
             print(f"   - AI analyzed: {ai_analyzed_count} images")
         print(f"\n📂 Output directory: {self.output_dir}")
         print(f"📋 History saved to: {self.history_file}")
+        self.logger.info(f"Processing complete: Processed={processed_count}, Skipped={skipped_count}, Errors={error_count}, AI analyzed={ai_analyzed_count}")
 
     def restore_files(self, history_file: Path, force: bool = False):
         """Restore files to original names using history file."""
         if not history_file.exists():
             print(f"⚠️ History file not found: {history_file}")
+            self.logger.warning(f"History file not found: {history_file}")
             return
         
         try:
@@ -516,9 +564,11 @@ class ImageRenamer:
                 history = json.load(f)
         except Exception as e:
             print(f"⚠️ Error loading history file: {e}")
+            self.logger.exception(f"Error loading history file: {e}")
             return
         
         print(f"📋 Loaded history with {len(history)} entries.")
+        self.logger.info(f"Loaded history with {len(history)} entries.")
         
         # Check which files can be restored
         restorable = []
@@ -554,17 +604,22 @@ class ImageRenamer:
         
         if not restorable:
             print("⚠️ No files can be restored.")
+            self.logger.warning("No files can be restored.")
             if not_found:
                 print(f"   {len(not_found)} files could not be found or would overwrite existing files.")
+                self.logger.warning(f"{len(not_found)} files could not be found or would overwrite existing files.")
             return
         
         print(f"\n✅ Found {len(restorable)} files that can be restored.")
+        self.logger.info(f"Found {len(restorable)} files that can be restored.")
         if not_found:
             print(f"⚠️ {len(not_found)} files cannot be restored (use --force to override).")
+            self.logger.warning(f"{len(not_found)} files cannot be restored (use --force to override).")
             
         confirm = input("\nRestore these files? (y/n): ")
         if confirm.lower() not in ['y', 'yes']:
             print("Operation canceled by user.")
+            self.logger.warning("Operation canceled by user.")
             return
         
         # Restore files
@@ -582,16 +637,19 @@ class ImageRenamer:
                 restored += 1
             except Exception as e:
                 print(f"\n⚠️ Error restoring {new_name} to {orig_name}: {e}")
+                self.logger.exception(f"Error restoring {new_name} to {orig_name}: {e}")
                 errors += 1
         
         print("\n✅ Restoration complete!")
         print(f"   - Restored: {restored} files")
         print(f"   - Errors: {errors} files")
+        self.logger.info(f"Restoration complete: Restored={restored}, Errors={errors}")
         
     def show_recovery_options(self, history_file: Path):
         """Show recovery options based on history file."""
         if not history_file.exists():
             print(f"⚠️ History file not found: {history_file}")
+            self.logger.warning(f"History file not found: {history_file}")
             return
         
         try:
@@ -599,9 +657,11 @@ class ImageRenamer:
                 history = json.load(f)
         except Exception as e:
             print(f"⚠️ Error loading history file: {e}")
+            self.logger.exception(f"Error loading history file: {e}")
             return
         
         print(f"📋 Loaded history with {len(history)} entries.")
+        self.logger.info(f"Loaded history with {len(history)} entries.")
         
         # Analyze history for recovery options
         original_exists = 0
@@ -631,6 +691,7 @@ class ImageRenamer:
         print(f"   - Files with only original version: {original_exists}")
         print(f"   - Files with only renamed version: {renamed_exists}")
         print(f"   - Files with neither version found: {none_exist}")
+        self.logger.info(f"Recovery Analysis: Both={both_exist}, Original={original_exists}, Renamed={renamed_exists}, None={none_exist}")
         
         if both_exist + renamed_exists > 0:
             print("\n💡 Recovery Options:")
@@ -641,19 +702,18 @@ class ImageRenamer:
                 print(f"      python image_seo_supername.py --restore --history \"{history_file}\" --force")
         else:
             print("\n⚠️ No files available for recovery.")
+            self.logger.warning("No files available for recovery.")
 
 
 def main():
     """Main function to process command line arguments and execute the tool."""
     parser = argparse.ArgumentParser(description="Image SEO SuperName: Optimize image filenames for SEO")
     
-    # Define mode groups
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument('-r', '--rename', action='store_true', help='Rename images mode')
     mode_group.add_argument('-s', '--restore', action='store_true', help='Restore original filenames mode')
     mode_group.add_argument('-o', '--recovery-options', action='store_true', help='Show recovery options')
     
-    # Common arguments
     parser.add_argument('-i', '--input', type=str, help='Input directory containing images')
     parser.add_argument('-O', '--output', type=str, help='Output directory (default: same as input)')
     parser.add_argument('-l', '--language', default='en', choices=['en', 'es'], help='Language for prompts (en=English, es=Spanish)')
@@ -661,25 +721,34 @@ def main():
     parser.add_argument('-H', '--history', type=str, help='Path to history file for restore/recovery')
     parser.add_argument('-f', '--force', action='store_true', help='Force overwrite existing files during restore')
     
-    # AI-specific arguments
     parser.add_argument('-a', '--ai', action='store_true', help='Enable AI-powered image analysis for enhanced naming')
     parser.add_argument('-k', '--api-key', type=str, help='Mistral API key (can also be set as MISTRAL_API_KEY env variable)')
     
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging with detailed information')
+    parser.add_argument('--log-file', type=str, default='image_seo_supername.log', 
+                        help='Path to log file (default: image_seo_supername.log)')
+    parser.add_argument('--no-log-file', action='store_true', help='Disable logging to file')
+    
     args = parser.parse_args()
     
-    # Load environment variables
+    log_file = None if args.no_log_file else args.log_file
+    logger = setup_logging(verbose=args.verbose, log_file=log_file)
+    logger.info("Starting Image SEO SuperName")
+    logger.debug(f"Command line arguments: {args}")
+    
     load_dotenv()
     
-    # Set API key from argument or environment
     if args.api_key:
+        logger.debug("Setting API key from command line argument")
         os.environ["MISTRAL_API_KEY"] = args.api_key
     
-    # Rename mode
     if args.rename:
         if not args.input:
+            logger.error("Input directory is required for rename mode")
             parser.error("--input directory is required for rename mode")
         input_dir = Path(args.input)
         if not input_dir.exists() or not input_dir.is_dir():
+            logger.error(f"Input directory not found: {args.input}")
             parser.error(f"Input directory not found: {args.input}")
         
         output_dir = Path(args.output) if args.output else input_dir
@@ -688,35 +757,38 @@ def main():
             output_dir=output_dir,
             language=args.language,
             safe_mode=not args.move,
-            use_ai=args.ai
+            use_ai=args.ai,
+            logger=logger
         )
         
-        print("\n🔤 Image SEO SuperName - Rename Mode")
-        if args.ai:
-            print("🤖 AI-powered image analysis: ENABLED")
+        logger.info("Running in rename mode")
         context = renamer.collect_user_context()
+        logger.debug(f"User context: {context}")
         renamer.process_images(context)
     
-    # Restore mode
     elif args.restore:
         if not args.history:
+            logger.error("History file is required for restore mode")
             parser.error("--history file is required for restore mode")
         history_file = Path(args.history)
         renamer = ImageRenamer(
-            input_dir=Path.cwd(),  # Not used in restore mode
-            safe_mode=not args.move
+            input_dir=Path.cwd(),
+            safe_mode=not args.move,
+            logger=logger
         )
-        print("\n🔄 Image SEO SuperName - Restore Mode")
+        logger.info("Running in restore mode")
         renamer.restore_files(history_file, force=args.force)
     
-    # Recovery options mode
     elif args.recovery_options:
         if not args.history:
+            logger.error("History file is required for recovery options mode")
             parser.error("--history file is required for recovery options mode")
         history_file = Path(args.history)
-        renamer = ImageRenamer(input_dir=Path.cwd())  # Not used in this mode
-        print("\n🛟 Image SEO SuperName - Recovery Options")
+        renamer = ImageRenamer(input_dir=Path.cwd(), logger=logger)
+        logger.info("Running in recovery options mode")
         renamer.show_recovery_options(history_file)
+
+    logger.info("Image SEO SuperName completed successfully")
 
 
 if __name__ == "__main__":
@@ -724,7 +796,9 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n\n⚠️ Process interrupted by user.")
+        logging.getLogger('image_seo_supername').warning("Process interrupted by user.")
         sys.exit(1)
     except Exception as e:
         print(f"\n❌ Error: {e}")
+        logging.getLogger('image_seo_supername').exception(f"Error: {e}")
         sys.exit(1)

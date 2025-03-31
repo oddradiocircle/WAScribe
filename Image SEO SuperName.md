@@ -10,6 +10,7 @@
 - **NOVEDAD**: Análisis de imágenes con IA usando la API de Mistral (pixtral-12b-2409)
 - **NOVEDAD**: Generación de texto alternativo (alt text) para mejorar SEO
 - **NOVEDAD**: Extracción de palabras clave basada en el contenido visual
+- **NOVEDAD**: Sistema de logging detallado para un mejor seguimiento y solución de problemas
 - Soporte multilingüe (Español e Inglés)
 - Renombramiento automático con numeración secuencial
 - Registro del historial de renombramientos
@@ -94,8 +95,11 @@ Muestra las opciones disponibles para recuperar archivos basándose en el histor
 | `--move` | `-m` | Usar modo MOVE en lugar de COPY (PELIGROSO) | No | `False` |
 | `--history` | `-H` | Ruta al archivo de historial | Sí (en modos restaurar/recuperación) | - |
 | `--force` | `-f` | Sobrescribir archivos existentes durante la restauración | No | `False` |
-| **NUEVO:** `--ai` | `-a` | Habilitar análisis de imágenes con IA | No | `False` |
-| **NUEVO:** `--api-key` | `-k` | Clave API de Mistral para funciones de IA | No | Desde variable de entorno |
+| `--ai` | `-a` | Habilitar análisis de imágenes con IA | No | `False` |
+| `--api-key` | `-k` | Clave API de Mistral para funciones de IA | No | Desde variable de entorno |
+| `--verbose` | `-v` | Activar registro detallado de operaciones | No | `False` |
+| `--log-file` | - | Ruta al archivo de log | No | `image_seo_supername.log` |
+| `--no-log-file` | - | Deshabilitar registro en archivo | No | `False` |
 
 ## Ejemplos de uso
 
@@ -147,6 +151,22 @@ python image_seo_supername.py --restore --history "./rename_history.json" --forc
 python image_seo_supername.py --recovery-options --history "./rename_history.json"
 ```
 
+### Uso con opciones de logging
+
+```bash
+# Habilitar logging detallado
+python image_seo_supername.py --rename --input "./mis_imagenes" --verbose
+
+# Especificar una ruta personalizada para el archivo de log
+python image_seo_supername.py --rename --input "./mis_imagenes" --log-file "./logs/renombrado_20231115.log"
+
+# Deshabilitar el registro en archivo (solo consola)
+python image_seo_supername.py --rename --input "./mis_imagenes" --no-log-file
+
+# Combinación con otras opciones
+python image_seo_supername.py --rename --input "./mis_imagenes" --ai --verbose --log-file "./logs/renombrado_con_ia.log"
+```
+
 ## Proceso de renombramiento
 
 Durante la ejecución, el script te solicitará:
@@ -154,20 +174,56 @@ Durante la ejecución, el script te solicitará:
 1. **Marca/Empresa**: El nombre de la marca o empresa (obligatorio).
 2. **Producto/Servicio**: El nombre del producto o servicio (obligatorio).
 3. **Categoría**: La categoría del producto o servicio (obligatorio).
-4. **NUEVO:** **Ubicación geográfica**: Región o área relevante (opcional).
+4. **Ubicación geográfica**: Región o área relevante (opcional).
 5. **Palabras clave**: Términos relacionados separados por comas (opcional).
-6. **NUEVO:** **Contexto adicional**: Información extra para mejorar el análisis de IA (cuando IA está habilitada).
+6. **Contexto adicional**: Información extra para mejorar el análisis de IA (cuando IA está habilitada).
 
 Con esta información, el programa:
 
 1. Normaliza y limpia todos los textos (elimina acentos, convierte a minúsculas, etc.).
 2. Elimina palabras vacías (stop words) que no aportan valor SEO.
-3. **NUEVO:** Si la IA está habilitada, analiza cada imagen para extraer contenido visual relevante.
+3. Si la IA está habilitada, analiza cada imagen para extraer contenido visual relevante.
 4. Construye nombres de archivo usando componentes relevantes de la entrada del usuario y análisis de IA.
 5. Añade numeración secuencial para evitar duplicados.
 6. Limita la longitud del nombre a 60 caracteres para cumplir con las mejores prácticas SEO.
 7. Renombra los archivos y guarda un registro de los cambios en `rename_history.json`.
-8. **NUEVO:** Almacena el texto alternativo generado por IA para cada imagen.
+8. Almacena el texto alternativo generado por IA para cada imagen.
+
+## Sistema de Logging
+
+El script implementa un sistema de logging detallado para facilitar el seguimiento y la solución de problemas:
+
+1. **Niveles de log**:
+   - **Normal**: Registra información básica sobre operaciones (INFO)
+   - **Detallado**: Con `--verbose`, registra información detallada de depuración (DEBUG)
+
+2. **Destinos de log**:
+   - **Consola**: Muestra mensajes de nivel INFO o superior
+   - **Archivo**: Registra todos los mensajes (incluyendo DEBUG con `--verbose`)
+
+3. **Información registrada**:
+   - Fecha y hora de cada operación
+   - Nivel de severidad (INFO, WARNING, ERROR, etc.)
+   - En modo detallado: nombre del archivo y número de línea
+   - Mensajes descriptivos de cada operación
+   - Errores y excepciones con trazas completas
+
+4. **Opciones de configuración**:
+   - `--verbose`: Aumenta el nivel de detalle
+   - `--log-file`: Especifica una ruta personalizada para el archivo de log
+   - `--no-log-file`: Deshabilita el registro en archivo
+
+5. **Archivo de log**:
+   - Formato: texto plano con entradas separadas por línea
+   - Ubicación predeterminada: `image_seo_supername.log` en el directorio actual
+   - Modo de apertura: append (añade a un archivo existente)
+   - Codificación: UTF-8 para soporte completo de caracteres
+
+El sistema de logging ayuda a:
+- Identificar problemas durante el procesamiento
+- Mantener un registro histórico de operaciones
+- Facilitar la depuración en caso de fallos
+- Proporcionar información detallada para soporte técnico
 
 ## Estructura de nombres generados
 
@@ -178,7 +234,7 @@ Los nombres de archivo generados siguen este patrón:
 [palabra-clave1]-[palabra-clave2]-[producto]-[marca]-[categoria]-[###].[extension]
 ```
 
-### **NUEVO:** Nomenclatura Mejorada con IA
+### Nomenclatura Mejorada con IA
 Cuando el análisis de IA está activado, los nombres siguen este patrón mejorado:
 
 ```
@@ -193,82 +249,11 @@ Donde:
 - Se incluye número secuencial de tres dígitos al final
 - La longitud total se limita a 60 caracteres
 
-## **NUEVO:** Proceso de Análisis con IA
-
-Cuando el modo de IA está habilitado, ocurre lo siguiente para cada imagen:
-
-1. La imagen se analiza utilizando el modelo pixtral-12b-2409 de Mistral
-2. La IA extrae:
-   - Palabras clave relevantes del contenido visual
-   - Sujeto principal o producto visible
-   - Características visuales (colores, estilo, composición)
-   - Contexto/escenario de la imagen
-   - Texto alternativo sugerido
-3. Esta información se combina con el contexto proporcionado por el usuario para una nomenclatura óptima
-4. Las sugerencias de texto alternativo se guardan en el archivo de historial
-
-## Archivo de historial
-
-El script crea un archivo `rename_history.json` en el directorio de salida que contiene un registro de todos los renombramientos realizados. Este archivo es fundamental para:
-
-1. Rastrear todos los cambios realizados
-2. Permitir la restauración de nombres originales
-3. Facilitar recuperación en caso de errores
-4. **NUEVO:** Almacenar el texto alternativo generado por IA para cada imagen
-
-## Seguridad y Prevención de Pérdida de Datos
-
-El script implementa varias medidas de seguridad:
-
-- **Modo COPY por defecto**: Las imágenes originales se preservan por defecto
-- **Confirmación explícita**: Se requiere confirmación para usar el modo MOVE
-- **Verificación previa**: Se verifican duplicados antes del procesamiento
-- **Historial preservado**: Se mantiene registro de todos los cambios
-- **Guardado progresivo**: El historial se guarda periódicamente durante el procesamiento
-- **Manejo de interrupciones**: Se guarda el historial si el script se interrumpe con Ctrl+C
-- **NUEVO:** **Reintentos automáticos**: Para fallos de conexión con la API de Mistral
-
-## Recuperación de Errores
-
-Si ocurren problemas durante el renombramiento, el script proporciona las siguientes opciones de recuperación:
-
-1. **Comando de restauración**: `--restore` para volver a los nombres originales
-2. **Asistente de recuperación**: `--recovery-options` para ver opciones disponibles
-3. **Restauración forzada**: `--force` para sobrescribir archivos existentes si es necesario
-4. **NUEVO:** **Fallback a modo estándar**: Si falla el análisis de IA, usa el nombramiento estándar
-
-## Mejores prácticas
-
-- Usa palabras clave específicas y relevantes.
-- Evita nombres demasiado genéricos.
-- Incluye términos de búsqueda populares relacionados con tu contenido.
-- Sé consistente con la nomenclatura de archivos.
-- Utiliza categorías precisas.
-- **IMPORTANTE**: Siempre haz una copia de seguridad antes de usar el modo MOVE.
-- Verifica el resultado del renombramiento antes de eliminar archivos originales.
-- **NUEVO:** Proporciona contexto detallado para mejorar el análisis de IA.
-- **NUEVO:** Revisa los textos alternativos generados por la IA para optimización adicional.
-
-## Solución de problemas
-
-- **No se encuentran imágenes**: Verifica que la ruta de entrada sea correcta y contenga archivos de imagen compatibles.
-- **Error de permisos**: Asegúrate de tener permisos de escritura en los directorios de entrada/salida.
-- **Nombres no deseados**: Revisa los parámetros proporcionados y ajusta las palabras clave según sea necesario.
-- **Archivos perdidos**: Utiliza la funcionalidad de restauración con el archivo de historial.
-- **Error de sobreescritura**: Usa un directorio de salida diferente o comprueba por nombres duplicados.
-- **NUEVO:** **Fallos en análisis de IA**: Verifica tu clave API y conexión a internet. El script usará nomenclatura estándar si el análisis falla.
-
-## Limitaciones
-
-- Procesa archivos con extensiones .jpg, .jpeg, .png, .gif y .webp.
-- **NUEVO:** La API de Mistral tiene un límite de tamaño de archivo de 10MB para cargas de imágenes.
-- **NUEVO:** Las funciones de IA requieren conexión a internet activa.
-- **NUEVO:** Pueden aplicarse límites de tasa de la API según tu suscripción a Mistral.
-
 ## En caso de emergencia
 
 Si has perdido archivos debido a un error en el script:
 
 1. **NO ELIMINES** el archivo `rename_history.json`
-2. Ejecuta `python image_seo_supername.py --recovery-options --history "ruta/al/rename_history.json"` 
-3. Sigue las instrucciones proporcionadas para recuperar tus archivos.
+2. **REVISA** el archivo de log para identificar el problema
+3. Ejecuta `python image_seo_supername.py --recovery-options --history "ruta/al/rename_history.json"` 
+4. Sigue las instrucciones proporcionadas para recuperar tus archivos.
