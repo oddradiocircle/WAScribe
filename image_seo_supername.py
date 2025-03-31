@@ -18,6 +18,7 @@ from PIL import Image
 import io
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
+import tempfile
 
 
 def setup_logging(verbose=False, log_file=None):
@@ -115,19 +116,56 @@ class AISEOProcessor:
         
         if not image_path.exists():
             return {"error": f"Image file not found: {image_path}"}
-            
-        # Check file size (10MB limit for Mistral API)
-        file_size_mb = image_path.stat().st_size / (1024 * 1024)
-        if file_size_mb > 10:
-            return {"error": f"Image too large ({file_size_mb:.1f}MB). Maximum size is 10MB."}
-            
+        
         try:
-            # Convert to base64
-            with open(image_path, "rb") as image_file:
-                # Try to open the image to validate it
-                Image.open(image_file).verify()
-                image_file.seek(0)  # Reset file pointer
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            # Create a temporary file for the optimized image
+            with tempfile.NamedTemporaryFile(suffix='.webp', delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+                
+                try:
+                    # Open the original image
+                    original_image = Image.open(image_path)
+                    
+                    # Resize to 1920px on the longest dimension while maintaining aspect ratio
+                    width, height = original_image.size
+                    max_dimension = max(width, height)
+                    if max_dimension > 1920:
+                        scale_factor = 1920 / max_dimension
+                        new_width = int(width * scale_factor)
+                        new_height = int(height * scale_factor)
+                        resized_image = original_image.resize((new_width, new_height), Image.LANCZOS)
+                    else:
+                        resized_image = original_image
+                    
+                    # Save as WebP with 90% quality
+                    quality = 90
+                    resized_image.save(temp_path, 'WEBP', quality=quality)
+                    
+                    # Check file size and reduce quality if needed
+                    file_size_mb = temp_path.stat().st_size / (1024 * 1024)
+                    self.logger.debug(f"Initial optimized image size: {file_size_mb:.2f}MB")
+                    
+                    # If still over 10MB, progressively reduce quality until under limit
+                    if file_size_mb > 10:
+                        self.logger.debug("Image still too large, reducing quality")
+                        for quality in [80, 70, 60, 50, 40, 30, 20]:
+                            resized_image.save(temp_path, 'WEBP', quality=quality)
+                            file_size_mb = temp_path.stat().st_size / (1024 * 1024)
+                            self.logger.debug(f"Reduced quality to {quality}, new size: {file_size_mb:.2f}MB")
+                            if file_size_mb <= 10:
+                                break
+                    
+                    # Final size check
+                    file_size_mb = temp_path.stat().st_size / (1024 * 1024)
+                    if file_size_mb > 10:
+                        return {"error": f"Unable to compress image below 10MB limit. Current size: {file_size_mb:.1f}MB"}
+                    
+                    # Convert optimized image to base64
+                    with open(temp_path, "rb") as image_file:
+                        base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    
+                except Exception as e:
+                    return {"error": f"Image processing error: {str(e)}"}
                 
             # Prepare user context as a string for the prompt
             context_str = "\n".join([f"- {key}: {value}" for key, value in context.items() if value])
@@ -178,6 +216,10 @@ class AISEOProcessor:
                 timeout=30
             )
             
+            # Clean up the temporary file
+            if temp_path.exists():
+                os.unlink(temp_path)
+            
             # Handle different error codes as per Mistral API docs
             if response.status_code == 200:
                 # Extract and parse JSON from response
@@ -208,6 +250,9 @@ class AISEOProcessor:
                 return {"error": error_msg}
                 
         except Exception as e:
+            # Ensure temp file cleanup in case of exceptions
+            if 'temp_path' in locals() and temp_path.exists():
+                os.unlink(temp_path)
             return {"error": f"Analysis error: {str(e)}"}
 
 
