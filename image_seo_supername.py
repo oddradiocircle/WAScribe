@@ -255,6 +255,47 @@ class AISEOProcessor:
                 os.unlink(temp_path)
             return {"error": f"Analysis error: {str(e)}"}
 
+    def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: int) -> str:
+        """Generate SEO-friendly name from AI analysis and context."""
+        components = []
+
+        # Extract keywords from AI analysis if available
+        if "keywords" in analysis and isinstance(analysis["keywords"], list):
+            keywords = [self._normalize_text(k) for k in analysis["keywords"][:3]]
+            components.extend(keywords)
+
+        # Add subject if available
+        if "subject" in analysis and analysis["subject"]:
+            subject = self._normalize_text(analysis["subject"])
+            if subject and subject not in components:
+                components.append(subject)
+
+        # Add basic components from context
+        for key in ["brand", "product", "category"]:
+            if context.get(key):
+                component = self._normalize_text(context.get(key, ""))
+                if component and component not in components:
+                    components.append(component)
+
+        # Combine components
+        if not components:
+            # Fallback to basic name if no components
+            return f"{context.get('brand', 'img')}-{context.get('product', 'product')}-{sequence_number:03d}"
+
+        # Create name with limited components
+        base_name = "-".join(components[:4])  # Limit to 4 components
+        return f"{base_name[:50]}-{sequence_number:03d}"  # Limit length and add sequence
+
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for SEO filename use."""
+        if not text:
+            return ""
+        text = str(text).lower()
+        text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+        text = re.sub(r"[^\w\s-]", "", text)
+        text = re.sub(r"[\s_]+", "-", text)
+        return text.strip("-")
+
 
 class SEOImageProcessor:
     def __init__(self, language='en'):
