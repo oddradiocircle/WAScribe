@@ -59,10 +59,11 @@ class SEONamingError(Exception):
 class AISEOProcessor:
     """AI-powered image analysis and SEO suggestion processor"""
     
-    def __init__(self, api_key: Optional[str] = None, logger=None):
+    def __init__(self, api_key: Optional[str] = None, logger=None, language='en'):
         """Initialize AI processor with optional API key."""
         self.api_key = api_key or os.getenv("MISTRAL_API_KEY")
         self.logger = logger or logging.getLogger('image_seo_supername')
+        self.language = language
         
         if not self.api_key:
             self.logger.warning("No Mistral API key found. AI-powered features will be disabled.")
@@ -169,21 +170,31 @@ class AISEOProcessor:
                 
             # Prepare user context as a string for the prompt
             context_str = "\n".join([f"- {key}: {value}" for key, value in context.items() if value])
-                
+
+            # Language-specific instructions
+            language_instructions = {
+                'en': "Provide a JSON response in English with:",
+                'es': "Proporciona una respuesta JSON en español con:"
+            }
+            lang_instruction = language_instructions.get(self.language, language_instructions['en'])
+
             # Create the prompt for image analysis according to Mistral API docs
             prompt = f"""
             This image is for a marketing campaign. Please analyze it considering this context:
-            
+
             {context_str}
-            
-            Provide a JSON response with:
+
+            {lang_instruction}
             1. A list of 5-7 SEO keywords extracted from the image (most relevant first)
             2. Main subject or product visible
             3. Visual characteristics (colors, style, composition)
             4. Context/setting of the image
-            5. Suggested alt text (max 125 chars)
-            
-            Format as: {{"keywords": ["word1", "word2",...], "subject": "...", "visual": "...", "context": "...", "alt_text": "..."}}
+            5. Suggested title (max 60 chars) - an engaging, descriptive title
+            6. Suggested caption (max 150 chars) - a brief caption explaining the image 
+            7. Suggested alt text (max 125 chars) - accessible description for screen readers
+            8. Suggested description (max 300 chars) - detailed SEO-rich description
+
+            Format as: {{"keywords": ["word1", "word2",...], "subject": "...", "visual": "...", "context": "...", "title": "...", "caption": "...", "alt_text": "...", "description": "..."}}
             """
             
             # Call Mistral API following the official format in documentation
@@ -204,7 +215,7 @@ class AISEOProcessor:
                         ]
                     }
                 ],
-                "max_tokens": 800
+                "max_tokens": 1200  # Increased to accommodate additional metadata
             }
             
             print(f"\r⏳ Analyzing image: {image_path.name}", end="", flush=True)
@@ -284,7 +295,19 @@ class AISEOProcessor:
 
         # Create name with limited components
         base_name = "-".join(components[:4])  # Limit to 4 components
-        return f"{base_name[:50]}-{sequence_number:03d}"  # Limit length and add sequence
+        
+        # Truncate to whole words
+        if len(base_name) > 50:
+            parts = base_name.split('-')
+            truncated = parts[0]
+            for part in parts[1:]:
+                if len(truncated) + len(part) + 1 <= 50:  # +1 for the hyphen
+                    truncated += f"-{part}"
+                else:
+                    break
+            base_name = truncated
+        
+        return f"{base_name}-{sequence_number:03d}"  # Add sequence
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for SEO filename use."""
@@ -373,7 +396,7 @@ class ImageRenamer:
         if use_ai:
             try:
                 self.logger.info("Initializing AI processor...")
-                self.ai_processor = AISEOProcessor(logger=self.logger)
+                self.ai_processor = AISEOProcessor(logger=self.logger, language=language)
                 if not self.ai_processor.api_key:
                     self.logger.warning("AI features disabled due to missing API key")
                     self.use_ai = False
@@ -603,9 +626,11 @@ class ImageRenamer:
                     "ai_analyzed": ai_analysis is not None and "error" not in ai_analysis
                 }
                 
-                # Generate alt text if AI was used
-                if ai_analysis and "alt_text" in ai_analysis:
-                    self.renamed_files[str(image_path)]["alt_text"] = ai_analysis["alt_text"]
+                # Save all SEO metadata elements
+                if ai_analysis and "error" not in ai_analysis:
+                    for field in ["alt_text", "title", "caption", "description"]:
+                        if field in ai_analysis:
+                            self.renamed_files[str(image_path)][field] = ai_analysis[field]
                 
                 # Perform the actual file operation (copy or rename)
                 if self.safe_mode:
@@ -634,6 +659,7 @@ class ImageRenamer:
         print(f"   - Errors: {error_count} images")
         if self.use_ai:
             print(f"   - AI analyzed: {ai_analyzed_count} images")
+            print("   - Generated SEO metadata: title, caption, alt text, and description")
         print(f"\n📂 Output directory: {self.output_dir}")
         print(f"📋 History saved to: {self.history_file}")
         self.logger.info(f"Processing complete: Processed={processed_count}, Skipped={skipped_count}, Errors={error_count}, AI analyzed={ai_analyzed_count}")
