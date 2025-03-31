@@ -266,7 +266,7 @@ class AISEOProcessor:
                 os.unlink(temp_path)
             return {"error": f"Analysis error: {str(e)}"}
 
-    def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: int) -> str:
+    def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: Optional[int] = None) -> str:
         """Generate SEO-friendly name from AI analysis and context."""
         components = []
 
@@ -278,24 +278,26 @@ class AISEOProcessor:
         # Add subject if available
         if "subject" in analysis and analysis["subject"]:
             subject = self._normalize_text(analysis["subject"])
-            if subject and subject not in components:
+            if subject and not any(subject in comp or comp in subject for comp in components):
                 components.append(subject)
 
-        # Add basic components from context
+        # Add basic components from context with deduplication
         for key in ["brand", "product", "category"]:
             if context.get(key):
                 component = self._normalize_text(context.get(key, ""))
-                if component and component not in components:
+                if component and not any(component in comp or comp in component for comp in components):
                     components.append(component)
 
         # Combine components
         if not components:
-            # Fallback to basic name if no components
-            return f"{context.get('brand', 'img')}-{context.get('product', 'product')}-{sequence_number:03d}"
+            base_name = f"{context.get('brand', 'img')}-{context.get('product', 'product')}"
+            if sequence_number is not None:
+                base_name = f"{base_name}-{sequence_number:03d}"
+            return base_name
 
         # Create name with limited components
         base_name = "-".join(components[:4])  # Limit to 4 components
-        
+
         # Truncate to whole words
         if len(base_name) > 50:
             parts = base_name.split('-')
@@ -306,8 +308,11 @@ class AISEOProcessor:
                 else:
                     break
             base_name = truncated
-        
-        return f"{base_name}-{sequence_number:03d}"  # Add sequence
+
+        if sequence_number is not None:
+            return f"{base_name}-{sequence_number:03d}"  # Add sequence
+        else:
+            return base_name
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for SEO filename use."""
@@ -559,10 +564,7 @@ class ImageRenamer:
         # Progress bar for processing
         for i, image_path in enumerate(tqdm(image_files, desc="Processing images")):
             try:
-                # Generate the new name with sequence number to avoid duplicates
                 sequence_number = i + 1
-                
-                # AI analysis for enhanced naming (if enabled)
                 ai_analysis = None
                 if self.use_ai and self.ai_processor:
                     try:
@@ -583,64 +585,55 @@ class ImageRenamer:
                     print(f"\n⚠️ AI analysis skipped for {image_path.name}: AI processor not available")
                     self.logger.warning(f"AI analysis skipped for {image_path.name}: AI processor not available")
                 
-                # Generate the new name
                 if ai_analysis and "error" not in ai_analysis:
-                    # Use AI-powered naming
-                    new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
-                    # Fallback to standard naming if AI naming fails
+                    new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context)
                     if not new_name_base:
                         new_name_base = self.processor.generate_seo_name(context, sequence_number)
                 else:
-                    # Use standard naming
                     new_name_base = self.processor.generate_seo_name(context, sequence_number)
                 
-                # Ensure the new name is valid, normalize if needed
                 new_name_base = self.processor._normalize_text(new_name_base)
-                
-                # Add extension
                 new_name = f"{new_name_base}{image_path.suffix.lower()}"
-                
-                # Check for duplicate names in the output directory
                 new_path = self.output_dir / new_name
+
                 if new_path.exists() and not (self.safe_mode and self.output_dir == self.input_dir):
-                    # If duplicate, try adding additional sequence number
-                    for j in range(1, 100):
-                        alt_name = f"{new_name_base}-alt{j}{image_path.suffix.lower()}"
-                        alt_path = self.output_dir / alt_name
-                        if not alt_path.exists():
-                            new_name = alt_name
-                            new_path = alt_path
-                            break
-                    else:
-                        # If all alternatives exist, skip this file
-                        print(f"\n⚠️ Skipping {image_path.name}: Unable to generate unique name")
-                        self.logger.warning(f"Skipping {image_path.name}: Unable to generate unique name")
-                        skipped_count += 1
-                        continue
-                
-                # Store original and new names
+                    if ai_analysis and "error" not in ai_analysis:
+                        new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
+                        new_name = f"{new_name_base}{image_path.suffix.lower()}"
+                        new_path = self.output_dir / new_name
+
+                    if new_path.exists():
+                        for j in range(1, 100):
+                            alt_name = f"{new_name_base}-alt{j}{image_path.suffix.lower()}"
+                            alt_path = self.output_dir / alt_name
+                            if not alt_path.exists():
+                                new_name = alt_name
+                                new_path = alt_path
+                                break
+                        else:
+                            print(f"\n⚠️ Skipping {image_path.name}: Unable to generate unique name")
+                            self.logger.warning(f"Skipping {image_path.name}: Unable to generate unique name")
+                            skipped_count += 1
+                            continue
+
                 self.renamed_files[str(image_path)] = {
                     "original_name": image_path.name,
                     "new_name": new_name,
                     "timestamp": datetime.now().isoformat(),
                     "ai_analyzed": ai_analysis is not None and "error" not in ai_analysis
                 }
-                
-                # Save all SEO metadata elements
+
                 if ai_analysis and "error" not in ai_analysis:
                     for field in ["alt_text", "title", "caption", "description"]:
                         if field in ai_analysis:
                             self.renamed_files[str(image_path)][field] = ai_analysis[field]
-                
-                # Perform the actual file operation (copy or rename)
+
                 if self.safe_mode:
                     shutil.copy2(image_path, new_path)
                 else:
                     shutil.move(image_path, new_path)
-                
+
                 processed_count += 1
-                
-                # Save history periodically
                 if processed_count % 10 == 0:
                     self.save_history()
                     
