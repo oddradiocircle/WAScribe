@@ -33,13 +33,11 @@ class AISEOProcessor:
         if not self.api_key:
             print("⚠️ No Mistral API key found. AI-powered features will be disabled.")
             print("   Please set MISTRAL_API_KEY environment variable or use --api-key option.")
-        elif self.api_key.startswith(("sk-", "mis-")):
-            # Validate API key format - simple check
+        else:
+            # No format validation since Mistral API key format may vary
             print("✅ Mistral API key found.")
             # Perform a quick validation of the API connection
             self._validate_api_connection()
-        else:
-            print("⚠️ Mistral API key has invalid format. AI features may not work correctly.")
     
     def _validate_api_connection(self):
         """Validate API connection with a simple request."""
@@ -48,21 +46,24 @@ class AISEOProcessor:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
-            # Simple text-only request to check if API works
-            data = {
-                "model": "mistral-tiny",  # Use smallest model for quick validation
-                "messages": [{"role": "user", "content": "Hello"}],
-                "max_tokens": 5
-            }
-            response = requests.post(
-                "https://api.mistral.ai/v1/chat/completions",
+            # Test the connection using the models endpoint which is lightweight
+            response = requests.get(
+                "https://api.mistral.ai/v1/models",
                 headers=headers,
-                json=data,
                 timeout=5  # Short timeout for quick check
             )
             
             if response.status_code == 200:
-                print("✅ Successfully connected to Mistral API.")
+                # Check if vision model is available
+                models = response.json()
+                available_models = [model["id"] for model in models.get("data", [])]
+                if "pixtral-12b-2409" in available_models:
+                    print("✅ Successfully connected to Mistral API and vision model is available.")
+                else:
+                    print("✅ Connected to Mistral API successfully.")
+                    print("⚠️ The vision model 'pixtral-12b-2409' was not found in available models.")
+                    print("   Available models:", ", ".join(available_models[:5]) + 
+                          ("..." if len(available_models) > 5 else ""))
             elif response.status_code == 401:
                 print("❌ Authentication failed: Invalid API key.")
                 print("   Please check your Mistral API key and try again.")
@@ -73,7 +74,7 @@ class AISEOProcessor:
         except Exception as e:
             print(f"⚠️ Could not validate Mistral API connection: {e}")
             print("   AI features may still work, but please check your internet connection.")
-        
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -106,7 +107,7 @@ class AISEOProcessor:
             # Prepare user context as a string for the prompt
             context_str = "\n".join([f"- {key}: {value}" for key, value in context.items() if value])
                 
-            # Create the prompt for image analysis
+            # Create the prompt for image analysis according to Mistral API docs
             prompt = f"""
             This image is for a marketing campaign. Please analyze it considering this context:
             
@@ -122,12 +123,13 @@ class AISEOProcessor:
             Format as: {{"keywords": ["word1", "word2",...], "subject": "...", "visual": "...", "context": "...", "alt_text": "..."}}
             """
             
-            # Call Mistral API
+            # Call Mistral API following the official format in documentation
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
             
+            # Using the chat completions endpoint with vision capability as per docs
             data = {
                 "model": "pixtral-12b-2409",
                 "messages": [
@@ -151,26 +153,35 @@ class AISEOProcessor:
                 timeout=30
             )
             
-            if response.status_code != 200:
+            # Handle different error codes as per Mistral API docs
+            if response.status_code == 200:
+                # Extract and parse JSON from response
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+                
+                # Extract JSON part from response (it might contain explanatory text)
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    try:
+                        analysis_data = json.loads(json_match.group(0))
+                        return analysis_data
+                    except json.JSONDecodeError as e:
+                        return {"error": f"Failed to parse JSON from response: {e}", "raw_response": content}
+                
+                # Fallback: return the full text if JSON parsing fails
+                return {"error": "Failed to parse structured data", "raw_response": content}
+            elif response.status_code == 400:
+                return {"error": "Bad request: " + response.json().get("error", {}).get("message", "Unknown error")}
+            elif response.status_code == 401:
+                return {"error": "Authentication error: Invalid API key"}
+            elif response.status_code == 429:
+                return {"error": "Rate limit exceeded. Please try again later."}
+            elif response.status_code == 500:
+                return {"error": "Mistral API server error. Please try again later."}
+            else:
                 error_msg = f"API error ({response.status_code}): {response.text[:100]}..."
                 return {"error": error_msg}
                 
-            # Extract and parse JSON from response
-            result = response.json()
-            content = result["choices"][0]["message"]["content"]
-            
-            # Extract JSON part from response (it might contain explanatory text)
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                try:
-                    analysis_data = json.loads(json_match.group(0))
-                    return analysis_data
-                except json.JSONDecodeError as e:
-                    return {"error": f"Failed to parse JSON from response: {e}", "raw_response": content}
-                    
-            # Fallback: return the full text if JSON parsing fails
-            return {"error": "Failed to parse structured data", "raw_response": content}
-            
         except Exception as e:
             return {"error": f"Analysis error: {str(e)}"}
 
