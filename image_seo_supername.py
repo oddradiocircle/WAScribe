@@ -90,10 +90,10 @@ class AISEOProcessor:
                 models = response.json()
                 available_models = [model["id"] for model in models.get("data", [])]
                 self.logger.debug(f"Available Mistral models: {available_models}")
-                if "pixtral-12b-2409" in available_models:
+                if "pixtral-large-latest" in available_models:
                     self.logger.info("Successfully connected to Mistral API and vision model is available.")
                 else:
-                    self.logger.warning("Vision model 'pixtral-12b-2409' not found.")
+                    self.logger.warning("Vision model 'pixtral-large-latest' not found.")
             elif response.status_code == 401:
                 self.logger.error("Authentication failed: Invalid Mistral API key.")
                 self.api_key = None
@@ -180,7 +180,7 @@ class AISEOProcessor:
 
             # Create the prompt for image analysis according to Mistral API docs
             prompt = f"""
-            This image is for a marketing campaign. Please analyze it considering this context:
+            Please analyze this image considering this context:
 
             {context_str}
 
@@ -205,7 +205,7 @@ class AISEOProcessor:
             
             # Using the chat completions endpoint with vision capability as per docs
             data = {
-                "model": "pixtral-12b-2409",
+                "model": "pixtral-large-latest",
                 "messages": [
                     {
                         "role": "user", 
@@ -268,75 +268,89 @@ class AISEOProcessor:
 
     def suggest_seo_name(self, analysis: Dict[str, Any], context: dict, sequence_number: Optional[int] = None) -> str:
         """Generate SEO-friendly name from AI analysis and context."""
-        components = []
-
-        # Extract keywords from AI analysis if available - but limit to fewer keywords
-        if "keywords" in analysis and isinstance(analysis["keywords"], list):
-            # Only use the first 2 most relevant keywords to avoid including everything from context
-            keywords = [self._normalize_text(k) for k in analysis["keywords"][:2]]
-            components.extend(keywords)
-
-        # Add subject if available - this is most reliable for what's actually in the image
+        unique_id = f"{sequence_number:03d}" if sequence_number is not None else datetime.now().strftime("%H%M%S")
+        
+        # Get distinctive keywords directly from analysis without filtering
+        distinctive_keywords = []
+        if "keywords" in analysis and isinstance(analysis["keywords"], list) and analysis["keywords"]:
+            distinctive_keywords = [
+                self._normalize_text(kw) for kw in analysis["keywords"][:4]
+            ]
+        
+        # Get more varied subject terms
+        subject_terms = []
         if "subject" in analysis and analysis["subject"]:
-            subject = self._normalize_text(analysis["subject"])
-            if subject and not any(subject in comp or comp in subject for comp in components):
-                components.append(subject)
-                
-        # If we have visual details, extract specific items visible in the image
+            subject = analysis["subject"].lower()
+            words = [w for w in subject.split() if len(w) > 3][:2]
+            if words:
+                subject_terms.append(self._normalize_text("-".join(words)))
+        
+        # Extract visual characteristics more freely
+        visual_terms = []
         if "visual" in analysis and analysis["visual"]:
             visual_text = analysis["visual"].lower()
-            visual_items = []
-            
-            # Check for common items - only add if actually mentioned in visual description
-            for item in ["camiseta", "t-shirt", "tee", "shirt", "bolso", "bag", "wallet", "billetera"]:
-                if item in visual_text and not any(item in comp for comp in components):
-                    normalized_item = self._normalize_text(item)
-                    visual_items.append(normalized_item)
-            
-            # Add up to 2 visual items that are actually visible
-            for item in visual_items[:2]:
-                if not any(item in comp or comp in item for comp in components):
-                    components.append(item)
-
-        # Always add brand name (usually safe to include)
-        if context.get("brand"):
-            brand = self._normalize_text(context.get("brand", ""))
-            if brand and not any(brand in comp or comp in brand for comp in components):
-                components.append(brand)
-                
-        # Only add other context items if we don't have enough components
-        if len(components) < 2:
-            for key in ["product", "category"]:
-                if context.get(key):
-                    component = self._normalize_text(context.get(key, ""))
-                    if component and not any(component in comp or comp in component for comp in components):
-                        components.append(component)
-
-        # Combine components
-        if not components:
-            base_name = f"{context.get('brand', 'img')}-{context.get('product', 'product')}"
-            if sequence_number is not None:
-                base_name = f"{base_name}-{sequence_number:03d}"
-            return base_name
-
-        # Create name with limited components - use fewer components for precision
-        base_name = "-".join(components[:3])  # Limit to 3 components for more focused names
-
-        # Truncate to whole words
-        if len(base_name) > 50:
-            parts = base_name.split('-')
-            truncated = parts[0]
-            for part in parts[1:]:
-                if len(truncated) + len(part) + 1 <= 50:  # +1 for the hyphen
-                    truncated += f"-{part}"
-                else:
-                    break
-            base_name = truncated
-
-        if sequence_number is not None:
-            return f"{base_name}-{sequence_number:03d}"  # Add sequence
+            visual_words = [w for w in visual_text.split() if len(w) > 4][:2]
+            if visual_words:
+                visual_terms.append(self._normalize_text(visual_words[0]))
+        
+        # Build more varied components
+        components = []
+        all_terms = distinctive_keywords + subject_terms + visual_terms
+        import random
+        random.shuffle(all_terms)
+        component_count = min(len(all_terms), random.randint(2, 4))
+        components = all_terms[:component_count]
+        
+        # Add a distinctive word from title if available
+        if "title" in analysis and analysis["title"] and random.random() > 0.5:
+            title_words = [w for w in analysis["title"].lower().split() if len(w) > 4]
+            if title_words:
+                components.insert(random.randint(0, len(components)), self._normalize_text(random.choice(title_words)))
+        
+        if components:
+            base_name = "-".join(components[:4])
+            if len(base_name) > 40:
+                base_name = base_name[:40]
+            return f"{base_name}-{unique_id}"
         else:
-            return base_name
+            return f"img-{unique_id}"
+
+    def validate_seo_metadata(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and adjust SEO metadata to match guidelines."""
+        validated = analysis.copy()
+        
+        # Alt text: STRICTLY 125 chars max
+        if "alt_text" in validated and validated["alt_text"]:
+            if len(validated["alt_text"]) > 125:
+                validated["alt_text"] = validated["alt_text"][:122] + "..."
+        
+        # Title: STRICTLY 50-60 chars
+        if "title" in validated and validated["title"]:
+            if len(validated["title"]) > 60:
+                validated["title"] = validated["title"][:57] + "..."
+            elif len(validated["title"]) < 30:  # Too short titles are not descriptive enough
+                # Try to expand short titles with brand or category
+                if "subject" in validated:
+                    validated["title"] = f"{validated['title']} | {validated['subject']}"[:60]
+        
+        # Caption: 15-25 words (roughly 150 chars)
+        if "caption" in validated and validated["caption"]:
+            words = validated["caption"].split()
+            if len(words) > 25:
+                validated["caption"] = " ".join(words[:25]) + "..."
+            elif len(words) < 10:  # Too short captions
+                if "visual" in validated:
+                    # Enhance with visual details
+                    validated["caption"] = f"{validated['caption']} {validated.get('visual', '')}"
+                    # Re-check length
+                    words = validated["caption"].split()
+                    if len(words) > 25:
+                        validated["caption"] = " ".join(words[:25]) + "..."
+        
+        # Description: Allow full length without truncation
+        # No character limit enforced for descriptions
+        
+        return validated
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for SEO filename use."""
@@ -347,6 +361,161 @@ class AISEOProcessor:
         text = re.sub(r"[^\w\s-]", "", text)
         text = re.sub(r"[\s_]+", "-", text)
         return text.strip("-")
+
+
+class DeepSeekProcessor:
+    """DeepSeek-powered filename generation processor"""
+    
+    def __init__(self, api_key: Optional[str] = None, logger=None, language='en'):
+        """Initialize DeepSeek processor with API key."""
+        self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        self.logger = logger or logging.getLogger('image_seo_supername')
+        self.language = language
+        
+        if not self.api_key:
+            self.logger.warning("No DeepSeek API key found. Advanced naming will be disabled.")
+            print("⚠️ No DeepSeek API key found. Advanced naming will be disabled.")
+        else:
+            self.logger.info("DeepSeek API key found.")
+            self._validate_api_connection()
+    
+    def _validate_api_connection(self):
+        """Validate DeepSeek API connection with a simple request."""
+        try:
+            self.logger.debug("Validating DeepSeek API connection...")
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            response = requests.get(
+                "https://api.deepseek.com/v1/models",
+                headers=headers,
+                timeout=5
+            )
+            self.logger.debug(f"DeepSeek API response status: {response.status_code}")
+            if response.status_code == 200:
+                self.logger.info("Successfully connected to DeepSeek API.")
+            elif response.status_code == 401:
+                self.logger.error("Authentication failed: Invalid DeepSeek API key.")
+                self.api_key = None
+            else:
+                self.logger.error(f"DeepSeek API returned status code: {response.status_code}")
+        except Exception as e:
+            self.logger.exception(f"Error validating DeepSeek API connection: {e}")
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((requests.exceptions.RequestException, ConnectionError))
+    )
+    def generate_creative_name(self, mistral_analysis: Dict[str, Any], context: dict, sequence_number: Optional[int] = None) -> str:
+        """Generate a creative, distinctive filename based on Mistral's image analysis and context."""
+        if not self.api_key:
+            return None
+
+        try:
+            # Format the description and context for DeepSeek
+            image_description = mistral_analysis.get("description", "")
+            alt_text = mistral_analysis.get("alt_text", "")
+            keywords = ", ".join(mistral_analysis.get("keywords", []))
+            
+            # Create context summary
+            context_str = "\n".join([f"- {key}: {value}" for key, value in context.items() if value])
+            
+            # Language-specific instructions
+            language_instructions = {
+                'en': "Respond only with the SEO filename suggestion, no explanations:",
+                'es': "Responde solo con la sugerencia de nombre de archivo SEO, sin explicaciones:"
+            }
+            lang_instruction = language_instructions.get(self.language, language_instructions['en'])
+            
+            unique_id = f"{sequence_number:03d}" if sequence_number is not None else datetime.now().strftime("%H%M%S")
+            
+            # Craft prompt for DeepSeek
+            prompt = f"""
+            I need a distinctive, creative SEO filename for an image.
+
+            IMAGE DESCRIPTION:
+            {image_description}
+            
+            ALT TEXT:
+            {alt_text}
+            
+            KEYWORDS:
+            {keywords}
+            
+            CONTEXT:
+            {context_str}
+            
+            Rules for the filename:
+            1. Use 2-4 specific, distinctive words that describe the unique aspects of this image
+            2. Avoid generic terms like "product", "fashion", "brand", etc.
+            3. Include words that would help in search
+            4. Connect words with hyphens
+            5. Don't include sequence numbers or file extensions
+            6. Use lowercase, no spaces, no special characters
+            7. Maximum length: 40 characters
+            8. Be specific to this exact product/scene
+            9. Don't use the exact same pattern as typical filenames
+            
+            {lang_instruction}
+            """
+            
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Call DeepSeek API
+            data = {
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "You're a specialist in creating distinctive SEO filenames for images."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7,
+                "max_tokens": 60
+            }
+            
+            print(f"\r⏳ Generating creative filename...", end="", flush=True)
+            
+            response = requests.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                filename = result["choices"][0]["message"]["content"].strip()
+                
+                # Clean up the filename - remove any quotes or extra spaces
+                filename = re.sub(r'["\']', '', filename)
+                filename = re.sub(r'\s+', '-', filename.strip())
+                
+                # Ensure it follows our SEO naming conventions
+                filename = self._normalize_text(filename)
+                
+                # Add the unique ID
+                return f"{filename}-{unique_id}"
+            else:
+                self.logger.error(f"DeepSeek API error ({response.status_code}): {response.text[:100]}...")
+                return None
+        
+        except Exception as e:
+            self.logger.exception(f"Error generating creative name: {e}")
+            return None
+    
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for SEO filename use."""
+        if not text:
+            return ""
+        text = text.lower()
+        text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+        text = re.sub(r'[^\w\s-]', '', text)
+        text = re.sub(r'[\s_]+', '-', text)
+        return text.strip('-')
 
 
 class SEOImageProcessor:
@@ -422,15 +591,20 @@ class ImageRenamer:
         self.logger.info(f"Configuration: language={language}, safe_mode={safe_mode}, use_ai={use_ai}")
         
         self.ai_processor = None
+        self.deepseek_processor = None
         if use_ai:
             try:
-                self.logger.info("Initializing AI processor...")
+                self.logger.info("Initializing AI processors...")
                 self.ai_processor = AISEOProcessor(logger=self.logger, language=language)
+                self.deepseek_processor = DeepSeekProcessor(logger=self.logger, language=language)
+                
                 if not self.ai_processor.api_key:
-                    self.logger.warning("AI features disabled due to missing API key")
+                    self.logger.warning("AI analysis features disabled due to missing Mistral API key")
                     self.use_ai = False
+                elif not self.deepseek_processor.api_key:
+                    self.logger.warning("DeepSeek creative naming disabled, falling back to standard naming")
             except Exception as e:
-                self.logger.exception(f"Failed to initialize AI processor: {e}")
+                self.logger.exception(f"Failed to initialize AI processors: {e}")
                 self.use_ai = False
         
         os.makedirs(self.output_dir, exist_ok=True)
@@ -579,6 +753,9 @@ class ImageRenamer:
         test_names = {}
         duplicates = []
         
+        # Track used names to ensure uniqueness
+        used_names = set()
+        
         # Process each image
         processed_count = 0
         skipped_count = 0
@@ -588,6 +765,7 @@ class ImageRenamer:
         # Progress bar for processing
         for i, image_path in enumerate(tqdm(image_files, desc="Processing images")):
             try:
+                # Ensure unique sequence number for each image
                 sequence_number = i + 1
                 ai_analysis = None
                 if self.use_ai and self.ai_processor:
@@ -610,35 +788,40 @@ class ImageRenamer:
                     self.logger.warning(f"AI analysis skipped for {image_path.name}: AI processor not available")
                 
                 if ai_analysis and "error" not in ai_analysis:
-                    new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context)
-                    if not new_name_base:
-                        new_name_base = self.processor.generate_seo_name(context, sequence_number)
+                    ai_analysis = self.ai_processor.validate_seo_metadata(ai_analysis)
+                    
+                    if self.deepseek_processor and self.deepseek_processor.api_key:
+                        creative_name = self.deepseek_processor.generate_creative_name(
+                            ai_analysis, context, sequence_number
+                        )
+                        if creative_name:
+                            new_name_base = creative_name
+                            print(f"\r✨ Created distinctive name: {new_name_base}" + " " * 30, end="", flush=True)
+                        else:
+                            new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
+                    else:
+                        new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
                 else:
                     new_name_base = self.processor.generate_seo_name(context, sequence_number)
                 
+                # Ensure the name is normalized
                 new_name_base = self.processor._normalize_text(new_name_base)
                 new_name = f"{new_name_base}{image_path.suffix.lower()}"
+                
+                # STRICT uniqueness check - if the name exists, force a truly unique name
+                if new_name in used_names or (self.output_dir / new_name).exists():
+                    # Add unique timestamp hash
+                    import time
+                    unique_suffix = hex(int(time.time() * 1000))[2:10]  # Use millisecond precision
+                    new_name = f"{new_name_base}-{unique_suffix}{image_path.suffix.lower()}"
+                    
+                    # Double-check uniqueness (extremely unlikely to collide, but safe)
+                    if new_name in used_names:
+                        new_name = f"{new_name_base}-{unique_suffix}-{sequence_number}{image_path.suffix.lower()}"
+                
+                # Mark name as used
+                used_names.add(new_name)
                 new_path = self.output_dir / new_name
-
-                if new_path.exists() and not (self.safe_mode and self.output_dir == self.input_dir):
-                    if ai_analysis and "error" not in ai_analysis:
-                        new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
-                        new_name = f"{new_name_base}{image_path.suffix.lower()}"
-                        new_path = self.output_dir / new_name
-
-                    if new_path.exists():
-                        for j in range(1, 100):
-                            alt_name = f"{new_name_base}-alt{j}{image_path.suffix.lower()}"
-                            alt_path = self.output_dir / alt_name
-                            if not alt_path.exists():
-                                new_name = alt_name
-                                new_path = alt_path
-                                break
-                        else:
-                            print(f"\n⚠️ Skipping {image_path.name}: Unable to generate unique name")
-                            self.logger.warning(f"Skipping {image_path.name}: Unable to generate unique name")
-                            skipped_count += 1
-                            continue
 
                 self.renamed_files[str(image_path)] = {
                     "original_name": image_path.name,
@@ -852,6 +1035,7 @@ def main():
     
     parser.add_argument('-a', '--ai', action='store_true', help='Enable AI-powered image analysis for enhanced naming')
     parser.add_argument('-k', '--api-key', type=str, help='Mistral API key (can also be set as MISTRAL_API_KEY env variable)')
+    parser.add_argument('-d', '--deepseek-key', type=str, help='DeepSeek API key (can also be set as DEEPSEEK_API_KEY env variable)')
     
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging with detailed information')
     parser.add_argument('--log-file', type=str, default='image_seo_supername.log', 
@@ -880,6 +1064,10 @@ def main():
     if args.api_key:
         logger.debug("Setting API key from command line argument")
         os.environ["MISTRAL_API_KEY"] = args.api_key
+    
+    if args.deepseek_key:
+        logger.debug("Setting DeepSeek API key from command line argument")
+        os.environ["DEEPSEEK_API_KEY"] = args.deepseek_key
     
     if args.rename:
         if not args.input:
