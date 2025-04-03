@@ -706,8 +706,131 @@ class ImageRenamer:
             
         return context
 
+    def _process_image_batch(self, image_files, context, start_sequence=1, retry_mode=False):
+        """Process a batch of images and return statistics and failed images."""
+        processed_count = 0
+        skipped_count = 0
+        error_count = 0
+        ai_analyzed_count = 0
+        ai_failed_count = 0
+        ai_failed_images = []
+        
+        # Track used names to ensure uniqueness
+        used_names = set()
+        
+        # Progress bar for processing
+        for i, image_path in enumerate(tqdm(image_files, desc="Processing images")):
+            try:
+                # Ensure unique sequence number for each image
+                sequence_number = start_sequence + i
+                ai_analysis = None
+                ai_failed = False
+                
+                if self.use_ai and self.ai_processor:
+                    try:
+                        ai_analysis = self.ai_processor.analyze_image(image_path, context)
+                        if "error" in ai_analysis:
+                            print(f"\n⚠️ AI analysis failed for {image_path.name}: {ai_analysis['error']}")
+                            self.logger.warning(f"AI analysis failed for {image_path.name}: {ai_analysis['error']}")
+                            print("   Falling back to standard naming.")
+                            ai_failed = True
+                            ai_failed_count += 1
+                            ai_failed_images.append(image_path)
+                        else:
+                            ai_analyzed_count += 1
+                            print(f"\r✅ AI analysis succeeded for {image_path.name}" + " " * 30, end="", flush=True)
+                            self.logger.info(f"AI analysis succeeded for {image_path.name}")
+                    except Exception as e:
+                        print(f"\n⚠️ AI analysis failed for {image_path.name}: {e}")
+                        self.logger.exception(f"AI analysis failed for {image_path.name}: {e}")
+                        print("   Falling back to standard naming.")
+                        ai_failed = True
+                        ai_failed_count += 1
+                        ai_failed_images.append(image_path)
+                elif self.use_ai:
+                    print(f"\n⚠️ AI analysis skipped for {image_path.name}: AI processor not available")
+                    self.logger.warning(f"AI analysis skipped for {image_path.name}: AI processor not available")
+                
+                if ai_analysis and "error" not in ai_analysis:
+                    ai_analysis = self.ai_processor.validate_seo_metadata(ai_analysis)
+                    
+                    if self.deepseek_processor and self.deepseek_processor.api_key:
+                        creative_name = self.deepseek_processor.generate_creative_name(
+                            ai_analysis, context, sequence_number
+                        )
+                        if creative_name:
+                            new_name_base = creative_name
+                            print(f"\r✨ Created distinctive name: {new_name_base}" + " " * 30, end="", flush=True)
+                        else:
+                            new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
+                            ai_failed = True
+                            if not retry_mode:  # Only track as failed in first pass
+                                ai_failed_count += 1
+                                ai_failed_images.append(image_path)
+                    else:
+                        new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
+                else:
+                    new_name_base = self.processor.generate_seo_name(context, sequence_number)
+                    if self.use_ai and not retry_mode:  # Only track as failed in first pass
+                        ai_failed = True
+                
+                # Ensure the name is normalized
+                new_name_base = self.processor._normalize_text(new_name_base)
+                new_name = f"{new_name_base}{image_path.suffix.lower()}"
+                
+                # STRICT uniqueness check - if the name exists, force a truly unique name
+                if new_name in used_names or (self.output_dir / new_name).exists():
+                    # Add unique timestamp hash
+                    import time
+                    unique_suffix = hex(int(time.time() * 1000))[2:10]  # Use millisecond precision
+                    new_name = f"{new_name_base}-{unique_suffix}{image_path.suffix.lower()}"
+                    
+                    # Double-check uniqueness (extremely unlikely to collide, but safe)
+                    if new_name in used_names:
+                        new_name = f"{new_name_base}-{unique_suffix}-{sequence_number}{image_path.suffix.lower()}"
+                
+                # Mark name as used
+                used_names.add(new_name)
+                new_path = self.output_dir / new_name
+
+                self.renamed_files[str(image_path)] = {
+                    "original_name": image_path.name,
+                    "new_name": new_name,
+                    "timestamp": datetime.now().isoformat(),
+                    "ai_analyzed": ai_analysis is not None and "error" not in ai_analysis,
+                    "ai_failed": ai_failed
+                }
+
+                if ai_analysis and "error" not in ai_analysis:
+                    for field in ["alt_text", "title", "caption", "description"]:
+                        if field in ai_analysis:
+                            self.renamed_files[str(image_path)][field] = ai_analysis[field]
+
+                if self.safe_mode:
+                    shutil.copy2(image_path, new_path)
+                else:
+                    shutil.move(image_path, new_path)
+
+                processed_count += 1
+                if processed_count % 10 == 0:
+                    self.save_history()
+                    
+            except Exception as e:
+                print(f"\n⚠️ Error processing {image_path.name}: {e}")
+                self.logger.exception(f"Error processing {image_path.name}: {e}")
+                error_count += 1
+                
+        return {
+            "processed": processed_count,
+            "skipped": skipped_count,
+            "errors": error_count,
+            "ai_analyzed": ai_analyzed_count,
+            "ai_failed": ai_failed_count,
+            "ai_failed_images": ai_failed_images
+        }
+
     def process_images(self, context: dict):
-        """Process images in the input directory."""
+        """Process images in the input directory with retry option for failed AI naming."""
         # Find all images in the input directory
         image_files = [f for f in self.input_dir.glob('*.*') 
                       if f.suffix.lower() in {'.jpg', '.jpeg', '.png', '.gif', '.webp'}]
@@ -749,120 +872,84 @@ class ImageRenamer:
                     self.logger.warning("Operation canceled by user due to low disk space.")
                     return
 
-        # Verify names before processing
-        test_names = {}
-        duplicates = []
+        # Process initial batch
+        total_stats = {
+            "processed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "ai_analyzed": 0,
+            "ai_failed": 0
+        }
         
-        # Track used names to ensure uniqueness
-        used_names = set()
+        result = self._process_image_batch(image_files, context)
         
-        # Process each image
-        processed_count = 0
-        skipped_count = 0
-        error_count = 0
-        ai_analyzed_count = 0
+        # Update total stats
+        for key in ["processed", "skipped", "errors", "ai_analyzed", "ai_failed"]:
+            total_stats[key] += result[key]
         
-        # Progress bar for processing
-        for i, image_path in enumerate(tqdm(image_files, desc="Processing images")):
-            try:
-                # Ensure unique sequence number for each image
-                sequence_number = i + 1
-                ai_analysis = None
-                if self.use_ai and self.ai_processor:
-                    try:
-                        ai_analysis = self.ai_processor.analyze_image(image_path, context)
-                        if "error" in ai_analysis:
-                            print(f"\n⚠️ AI analysis failed for {image_path.name}: {ai_analysis['error']}")
-                            self.logger.warning(f"AI analysis failed for {image_path.name}: {ai_analysis['error']}")
-                            print("   Falling back to standard naming.")
-                        else:
-                            ai_analyzed_count += 1
-                            print(f"\r✅ AI analysis succeeded for {image_path.name}" + " " * 30, end="", flush=True)
-                            self.logger.info(f"AI analysis succeeded for {image_path.name}")
-                    except Exception as e:
-                        print(f"\n⚠️ AI analysis failed for {image_path.name}: {e}")
-                        self.logger.exception(f"AI analysis failed for {image_path.name}: {e}")
-                        print("   Falling back to standard naming.")
-                elif self.use_ai:
-                    print(f"\n⚠️ AI analysis skipped for {image_path.name}: AI processor not available")
-                    self.logger.warning(f"AI analysis skipped for {image_path.name}: AI processor not available")
+        # Save history after initial processing
+        self.save_history()
+        
+        # Handle retries for AI failures if needed
+        retry_count = 0
+        remaining_images = result["ai_failed_images"]
+        
+        while self.use_ai and remaining_images and retry_count < 3:  # Limit to 3 retries
+            # Show summary and ask for retry
+            print("\n📊 Processing Summary:")
+            print(f"   - Processed: {total_stats['processed']} images")
+            print(f"   - AI analyzed successfully: {total_stats['ai_analyzed']} images")
+            print(f"   - AI analysis failed: {total_stats['ai_failed']} images")
+            
+            if not remaining_images:
+                break
                 
-                if ai_analysis and "error" not in ai_analysis:
-                    ai_analysis = self.ai_processor.validate_seo_metadata(ai_analysis)
-                    
-                    if self.deepseek_processor and self.deepseek_processor.api_key:
-                        creative_name = self.deepseek_processor.generate_creative_name(
-                            ai_analysis, context, sequence_number
-                        )
-                        if creative_name:
-                            new_name_base = creative_name
-                            print(f"\r✨ Created distinctive name: {new_name_base}" + " " * 30, end="", flush=True)
-                        else:
-                            new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
-                    else:
-                        new_name_base = self.ai_processor.suggest_seo_name(ai_analysis, context, sequence_number)
-                else:
-                    new_name_base = self.processor.generate_seo_name(context, sequence_number)
+            retry_count += 1
+            print(f"\n⚠️ {len(remaining_images)} images had AI analysis failures.")
+            retry = input(f"Would you like to retry AI analysis for failed images? (y/n): ")
+            
+            if retry.lower() not in ['y', 'yes']:
+                print("Skipping retry for failed images.")
+                break
                 
-                # Ensure the name is normalized
-                new_name_base = self.processor._normalize_text(new_name_base)
-                new_name = f"{new_name_base}{image_path.suffix.lower()}"
-                
-                # STRICT uniqueness check - if the name exists, force a truly unique name
-                if new_name in used_names or (self.output_dir / new_name).exists():
-                    # Add unique timestamp hash
-                    import time
-                    unique_suffix = hex(int(time.time() * 1000))[2:10]  # Use millisecond precision
-                    new_name = f"{new_name_base}-{unique_suffix}{image_path.suffix.lower()}"
-                    
-                    # Double-check uniqueness (extremely unlikely to collide, but safe)
-                    if new_name in used_names:
-                        new_name = f"{new_name_base}-{unique_suffix}-{sequence_number}{image_path.suffix.lower()}"
-                
-                # Mark name as used
-                used_names.add(new_name)
-                new_path = self.output_dir / new_name
-
-                self.renamed_files[str(image_path)] = {
-                    "original_name": image_path.name,
-                    "new_name": new_name,
-                    "timestamp": datetime.now().isoformat(),
-                    "ai_analyzed": ai_analysis is not None and "error" not in ai_analysis
-                }
-
-                if ai_analysis and "error" not in ai_analysis:
-                    for field in ["alt_text", "title", "caption", "description"]:
-                        if field in ai_analysis:
-                            self.renamed_files[str(image_path)][field] = ai_analysis[field]
-
-                if self.safe_mode:
-                    shutil.copy2(image_path, new_path)
-                else:
-                    shutil.move(image_path, new_path)
-
-                processed_count += 1
-                if processed_count % 10 == 0:
-                    self.save_history()
-                    
-            except Exception as e:
-                print(f"\n⚠️ Error processing {image_path.name}: {e}")
-                self.logger.exception(f"Error processing {image_path.name}: {e}")
-                error_count += 1
+            print(f"\n🔄 Retry #{retry_count}: Processing {len(remaining_images)} failed images...")
+            
+            # Process only the failed images
+            retry_result = self._process_image_batch(
+                remaining_images, 
+                context, 
+                start_sequence=total_stats["processed"] + 1,
+                retry_mode=True
+            )
+            
+            # Update totals
+            total_stats["processed"] += retry_result["processed"]
+            total_stats["skipped"] += retry_result["skipped"]
+            total_stats["errors"] += retry_result["errors"]
+            total_stats["ai_analyzed"] += retry_result["ai_analyzed"]
+            
+            # Update remaining images for next potential retry
+            remaining_images = retry_result["ai_failed_images"]
+            
+            # Save history after retry
+            self.save_history()
         
         # Final save of history
         self.save_history()
         
-        # Show summary
+        # Show final summary
         print("\n✅ Processing complete!")
-        print(f"   - Processed: {processed_count} images")
-        print(f"   - Skipped: {skipped_count} images")
-        print(f"   - Errors: {error_count} images")
+        print(f"   - Processed: {total_stats['processed']} images")
+        print(f"   - Skipped: {total_stats['skipped']} images")
+        print(f"   - Errors: {total_stats['errors']} images")
         if self.use_ai:
-            print(f"   - AI analyzed: {ai_analyzed_count} images")
+            print(f"   - AI analyzed successfully: {total_stats['ai_analyzed']} images")
+            if total_stats['ai_failed'] > 0:
+                print(f"   - AI analysis failed: {total_stats['ai_failed']} images (standard naming used)")
             print("   - Generated SEO metadata: title, caption, alt text, and description")
         print(f"\n📂 Output directory: {self.output_dir}")
         print(f"📋 History saved to: {self.history_file}")
-        self.logger.info(f"Processing complete: Processed={processed_count}, Skipped={skipped_count}, Errors={error_count}, AI analyzed={ai_analyzed_count}")
+        self.logger.info(f"Processing complete: Processed={total_stats['processed']}, Skipped={total_stats['skipped']}, Errors={total_stats['errors']}, AI analyzed={total_stats['ai_analyzed']}")
 
     def restore_files(self, history_file: Path, force: bool = False):
         """Restore files to original names using history file."""
