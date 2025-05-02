@@ -2,14 +2,20 @@
 
 ## Descripción
 
-`image_seo_supername.py` es una herramienta de línea de comandos que ayuda a optimizar el SEO de tus imágenes mediante el renombramiento inteligente de archivos basado en el contexto proporcionado y análisis con inteligencia artificial. La herramienta genera nombres de archivo SEO-friendly utilizando información relevante sobre la marca, producto, categoría y palabras clave, además de aprovechar las capacidades de IA para la extracción de contexto y optimización de palabras clave.
+`image_seo_supername.py` es una herramienta de línea de comandos que optimiza el SEO de imágenes mediante renombramiento inteligente de archivos basado en contexto proporcionado y análisis con inteligencia artificial. Genera nombres SEO-friendly utilizando información relevante sobre marca, producto, categoría y palabras clave, aprovechando las capacidades de IA para extraer contexto visual, optimizar palabras clave y generar metadatos SEO.
 
 ## Características
 
 - Generación de nombres de archivos optimizados para SEO
-- **NOVEDAD**: Análisis de imágenes con IA usando la API de Mistral (pixtral-12b-2409)
-- **NOVEDAD**: Generación de texto alternativo (alt text) para mejorar SEO
+- **NOVEDAD**: Análisis de imágenes con IA usando la API de Mistral (pixtral-large-latest)
+- **NOVEDAD**: Generación de nombres creativos con DeepSeek IA para filenames más distintivos
+- **NOVEDAD**: Generación completa de metadatos SEO:
+  - Texto alternativo (alt text) - máximo 125 caracteres
+  - Título optimizado - entre 50-60 caracteres 
+  - Descripción detallada - hasta 300 caracteres
+  - Leyenda/caption - 15-25 palabras
 - **NOVEDAD**: Extracción de palabras clave basada en el contenido visual
+- **NOVEDAD**: Optimización automática de imágenes para análisis AI (redimensionado y compresión)
 - **NOVEDAD**: Sistema de logging detallado para un mejor seguimiento y solución de problemas
 - Soporte multilingüe (Español e Inglés)
 - Renombramiento automático con numeración secuencial
@@ -21,12 +27,14 @@
 - Funcionalidad de restauración para recuperar nombres originales
 - Verificación de duplicados antes del procesamiento
 - **NOVEDAD**: Campos adicionales para ubicación geográfica y contexto
+- **NOVEDAD**: Sistema de reintentos para análisis AI fallidos
 
 ## Requisitos
 
 - Python 3.6 o superior
 - Bibliotecas: pathlib, tqdm, dotenv, **requests**, **Pillow**, **tenacity**
-- **NOVEDAD**: Clave de API de Mistral (para funciones de IA)
+- **NOVEDAD**: Clave de API de Mistral (para análisis de imágenes)
+- **NOVEDAD**: Clave de API de DeepSeek (para nombres creativos mejorados, opcional)
 
 ## Instalación
 
@@ -48,6 +56,16 @@ echo "MISTRAL_API_KEY=tu-clave-api" > .env
 
 # Opción 3: Proporcionar directamente en el comando
 python image_seo_supername.py --rename --input /ruta/imagenes --ai --api-key "tu-clave-api"
+```
+
+4. **NOVEDAD**: Para nombres creativos mejorados, obtén una clave API de DeepSeek y configúrala (opcional):
+
+```bash
+# Opción 1: Como variable de entorno
+export DEEPSEEK_API_KEY="tu-clave-api"
+
+# Opción 2: Crear archivo .env
+echo "DEEPSEEK_API_KEY=tu-clave-api" >> .env
 ```
 
 ## Uso básico
@@ -97,6 +115,7 @@ Muestra las opciones disponibles para recuperar archivos basándose en el histor
 | `--force` | `-f` | Sobrescribir archivos existentes durante la restauración | No | `False` |
 | `--ai` | `-a` | Habilitar análisis de imágenes con IA | No | `False` |
 | `--api-key` | `-k` | Clave API de Mistral para funciones de IA | No | Desde variable de entorno |
+| `--deepseek-key` | - | Clave API de DeepSeek para nombres creativos | No | Desde variable de entorno |
 | `--verbose` | `-v` | Activar registro detallado de operaciones | No | `False` |
 | `--log-file` | - | Ruta al archivo de log | No | `image_seo_supername.log` en el directorio de entrada |
 | `--no-log-file` | - | Deshabilitar registro en archivo | No | `False` |
@@ -113,6 +132,12 @@ python image_seo_supername.py --rename --input "./mis_imagenes"
 
 ```bash
 python image_seo_supername.py --rename --input "./mis_imagenes" --ai
+```
+
+### Renombrar con nombres creativos mejorados
+
+```bash
+python image_seo_supername.py --rename --input "./mis_imagenes" --ai --deepseek-key "tu-clave-api"
 ```
 
 ### Modo Renombrar (Peligroso - modifica originales)
@@ -188,6 +213,7 @@ Con esta información, el programa:
 6. Limita la longitud del nombre a 60 caracteres para cumplir con las mejores prácticas SEO.
 7. Renombra los archivos y guarda un registro de los cambios en `rename_history.json`.
 8. Almacena el texto alternativo generado por IA para cada imagen.
+9. **NOVEDAD**: Genera metadatos SEO adicionales (título, descripción, leyenda).
 
 ## Sistema de Logging
 
